@@ -108,4 +108,6 @@
 #define HWCAP2_LRCPC3		(1UL << 46)
 #define HWCAP2_LSE128		(1UL << 47)
 
+#define HWCAP2_MORELLO		(1UL << 63)
+
 #endif /* _UAPI__ASM_HWCAP_H */
