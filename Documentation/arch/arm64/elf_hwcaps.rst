@@ -317,6 +317,10 @@ HWCAP2_LRCPC3
 HWCAP2_LSE128
     Functionality implied by ID_AA64ISAR0_EL1.Atomic == 0b0011.
 
+HWCAP2_MORELLO
+    Functionality implied by ID_AA64PFR1_EL1.CE == 0b0001, as described
+    by Documentation/arm64/morello.rst.
+
 4. Unused AT_HWCAP bits
 -----------------------
 
