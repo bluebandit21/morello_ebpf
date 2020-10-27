@@ -427,11 +427,19 @@ extern int sendmsg_copy_msghdr(struct msghdr *msg,
 			       struct iovec **iov);
 extern int recvmsg_copy_msghdr(struct msghdr *msg,
 			       struct user_msghdr __user *umsg, unsigned flags,
+#ifdef CONFIG_CHERI_PURECAP_UABI
+			       struct sockaddr * __capability *uaddr,
+#else
 			       struct sockaddr __user **uaddr,
+#endif
 			       struct iovec **iov);
 extern int __copy_msghdr(struct msghdr *kmsg,
 			 struct user_msghdr *umsg,
+#ifdef CONFIG_CHERI_PURECAP_UABI
+			 struct sockaddr * __capability *save_addr);
+#else
 			 struct sockaddr __user **save_addr);
+#endif
 
 /* helpers which do the actual work for syscalls */
 extern int __sys_recvfrom(int fd, void __user *ubuf, size_t size,
