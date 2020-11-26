@@ -164,7 +164,7 @@ pid_t f_getown(struct file *filp)
 	return pid;
 }
 
-static int f_setown_ex(struct file *filp, unsigned long arg)
+static int f_setown_ex(struct file *filp, user_uintptr_t arg)
 {
 	struct f_owner_ex __user *owner_p = (void __user *)arg;
 	struct f_owner_ex owner;
@@ -204,7 +204,7 @@ static int f_setown_ex(struct file *filp, unsigned long arg)
 	return ret;
 }
 
-static int f_getown_ex(struct file *filp, unsigned long arg)
+static int f_getown_ex(struct file *filp, user_uintptr_t arg)
 {
 	struct f_owner_ex __user *owner_p = (void __user *)arg;
 	struct f_owner_ex owner = {};
@@ -244,7 +244,7 @@ static int f_getown_ex(struct file *filp, unsigned long arg)
 }
 
 #ifdef CONFIG_CHECKPOINT_RESTORE
-static int f_getowner_uids(struct file *filp, unsigned long arg)
+static int f_getowner_uids(struct file *filp, user_uintptr_t arg)
 {
 	struct user_namespace *user_ns = current_user_ns();
 	uid_t __user *dst = (void __user *)arg;
@@ -262,7 +262,7 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 	return err;
 }
 #else
-static int f_getowner_uids(struct file *filp, unsigned long arg)
+static int f_getowner_uids(struct file *filp, user_uintptr_t arg)
 {
 	return -EINVAL;
 }
@@ -284,7 +284,7 @@ static bool rw_hint_valid(enum rw_hint hint)
 }
 
 static long fcntl_rw_hint(struct file *file, unsigned int cmd,
-			  unsigned long arg)
+			  user_uintptr_t arg)
 {
 	struct inode *inode = file_inode(file);
 	u64 __user *argp = (u64 __user *)arg;
@@ -313,7 +313,7 @@ static long fcntl_rw_hint(struct file *file, unsigned int cmd,
 	}
 }
 
-static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
+static long do_fcntl(int fd, unsigned int cmd, user_uintptr_t arg,
 		struct file *filp)
 {
 	void __user *argp = (void __user *)arg;
@@ -438,7 +438,7 @@ static int check_fcntl_cmd(unsigned cmd)
 	return 0;
 }
 
-SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
+SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd, user_uintptr_t, arg)
 {	
 	struct fd f = fdget_raw(fd);
 	long err = -EBADF;
@@ -463,7 +463,7 @@ out:
 
 #if BITS_PER_LONG == 32
 SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
-		unsigned long, arg)
+		user_uintptr_t, arg)
 {	
 	void __user *argp = (void __user *)arg;
 	struct fd f = fdget_raw(fd);
