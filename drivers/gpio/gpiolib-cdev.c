@@ -58,7 +58,7 @@ static_assert(IS_ALIGNED(sizeof(struct gpio_v2_line_values), 8));
  */
 
 typedef __poll_t (*poll_fn)(struct file *, struct poll_table_struct *);
-typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
+typedef long (*ioctl_fn)(struct file *, unsigned int, user_uintptr_t);
 typedef ssize_t (*read_fn)(struct file *, char __user *,
 			   size_t count, loff_t *);
 
@@ -76,7 +76,7 @@ static __poll_t call_poll_locked(struct file *file,
 }
 
 static long call_ioctl_locked(struct file *file, unsigned int cmd,
-			      unsigned long arg, struct gpio_device *gdev,
+			      user_uintptr_t arg, struct gpio_device *gdev,
 			      ioctl_fn func)
 {
 	long ret;
@@ -236,7 +236,7 @@ static long linehandle_set_config(struct linehandle_state *lh,
 }
 
 static long linehandle_ioctl_unlocked(struct file *file, unsigned int cmd,
-				      unsigned long arg)
+				      user_uintptr_t arg)
 {
 	struct linehandle_state *lh = file->private_data;
 	void __user *ip = (void __user *)arg;
@@ -295,7 +295,7 @@ static long linehandle_ioctl_unlocked(struct file *file, unsigned int cmd,
 }
 
 static long linehandle_ioctl(struct file *file, unsigned int cmd,
-			     unsigned long arg)
+			     user_uintptr_t arg)
 {
 	struct linehandle_state *lh = file->private_data;
 
@@ -1444,7 +1444,7 @@ static long linereq_set_config(struct linereq *lr, void __user *ip)
 }
 
 static long linereq_ioctl_unlocked(struct file *file, unsigned int cmd,
-				   unsigned long arg)
+				   user_uintptr_t arg)
 {
 	struct linereq *lr = file->private_data;
 	void __user *ip = (void __user *)arg;
@@ -1465,7 +1465,7 @@ static long linereq_ioctl_unlocked(struct file *file, unsigned int cmd,
 }
 
 static long linereq_ioctl(struct file *file, unsigned int cmd,
-			  unsigned long arg)
+			  user_uintptr_t arg)
 {
 	struct linereq *lr = file->private_data;
 
@@ -1958,7 +1958,7 @@ static int lineevent_release(struct inode *inode, struct file *file)
 }
 
 static long lineevent_ioctl_unlocked(struct file *file, unsigned int cmd,
-				     unsigned long arg)
+				     user_uintptr_t arg)
 {
 	struct lineevent_state *le = file->private_data;
 	void __user *ip = (void __user *)arg;
@@ -1990,7 +1990,7 @@ static long lineevent_ioctl_unlocked(struct file *file, unsigned int cmd,
 }
 
 static long lineevent_ioctl(struct file *file, unsigned int cmd,
-			    unsigned long arg)
+			    user_uintptr_t arg)
 {
 	struct lineevent_state *le = file->private_data;
 
@@ -2481,7 +2481,7 @@ static int lineinfo_unwatch(struct gpio_chardev_data *cdev, void __user *ip)
 	return 0;
 }
 
-static long gpio_ioctl_unlocked(struct file *file, unsigned int cmd, unsigned long arg)
+static long gpio_ioctl_unlocked(struct file *file, unsigned int cmd, user_uintptr_t arg)
 {
 	struct gpio_chardev_data *cdev = file->private_data;
 	struct gpio_device *gdev = cdev->gdev;
@@ -2521,7 +2521,7 @@ static long gpio_ioctl_unlocked(struct file *file, unsigned int cmd, unsigned lo
 /*
  * gpio_ioctl() - ioctl handler for the GPIO chardev
  */
-static long gpio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long gpio_ioctl(struct file *file, unsigned int cmd, user_uintptr_t arg)
 {
 	struct gpio_chardev_data *cdev = file->private_data;
 

@@ -2252,7 +2252,7 @@ static int fuse_device_clone(struct fuse_conn *fc, struct file *new)
 }
 
 static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
-			   unsigned long arg)
+			   user_uintptr_t arg)
 {
 	int res;
 	int oldfd;

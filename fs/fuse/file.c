@@ -3215,7 +3215,9 @@ static const struct file_operations fuse_file_operations = {
 	.splice_read	= filemap_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.unlocked_ioctl	= fuse_file_ioctl,
+#ifdef CONFIG_COMPAT
 	.compat_ioctl	= fuse_file_compat_ioctl,
+#endif
 	.poll		= fuse_file_poll,
 	.fallocate	= fuse_file_fallocate,
 	.copy_file_range = fuse_copy_file_range,
