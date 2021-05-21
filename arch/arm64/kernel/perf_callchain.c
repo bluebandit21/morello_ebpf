@@ -10,6 +10,13 @@
 
 #include <asm/pointer_auth.h>
 
+/*
+ * TODO [PCuABI] - perf_callchain_user() is disabled for now because it needs
+ * explicit support for purecap + compat64 (as opposed to base AArch64 +
+ * compat32)
+ */
+#ifndef CONFIG_CHERI_PURECAP_UABI
+
 struct frame_tail {
 	struct frame_tail	__user *fp;
 	unsigned long		lr;
@@ -131,6 +138,8 @@ void perf_callchain_user(struct perf_callchain_entry_ctx *entry,
 #endif
 	}
 }
+
+#endif /* !CONFIG_CHERI_PURECAP_UABI */
 
 static bool callchain_trace(void *data, unsigned long pc)
 {
