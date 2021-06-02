@@ -431,7 +431,8 @@ static struct iovec *__io_import_iovec(int ddir, struct io_kiocb *req,
 			buf = io_buffer_select(req, &sqe_len, issue_flags);
 			if (!buf)
 				return ERR_PTR(-ENOBUFS);
-			rw->addr = (unsigned long) buf;
+			/* TODO [PCuABI] - capability checks for uaccess */
+			rw->addr = user_ptr_addr(buf);
 			rw->len = sqe_len;
 		}
 
