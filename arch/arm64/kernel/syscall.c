@@ -20,7 +20,7 @@ long sys_ni_syscall(void);
 
 static long do_ni_syscall(struct pt_regs *regs, int scno)
 {
-#ifdef CONFIG_COMPAT
+#ifdef CONFIG_COMPAT32
 	long ret;
 	if (is_compat_task()) {
 		ret = compat_arm_syscall(regs, scno);
@@ -179,7 +179,14 @@ trace_exit:
 
 void do_el0_svc(struct pt_regs *regs)
 {
-	el0_svc_common(regs, regs->regs[8], __NR_syscalls, sys_call_table);
+	const syscall_entry_t *table = sys_call_table;
+
+#ifdef CONFIG_COMPAT64
+	if (test_thread_flag(TIF_64BIT_COMPAT))
+		table = compat_sys_call_table;
+#endif
+
+	el0_svc_common(regs, regs->regs[8], __NR_syscalls, table);
 }
 
 #ifdef CONFIG_COMPAT
