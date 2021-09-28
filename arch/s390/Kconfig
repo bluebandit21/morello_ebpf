@@ -457,6 +457,9 @@ config COMPAT
 	  (and some other stuff like libraries and such) is needed for
 	  executing 31 bit applications.  It is safe to say "Y".
 
+config COMPAT32
+	def_bool y if COMPAT
+
 config SMP
 	def_bool y
 
