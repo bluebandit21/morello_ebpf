@@ -1763,6 +1763,7 @@ static const struct user_regset_view user_aarch64_view = {
 };
 
 #ifdef CONFIG_COMPAT
+#ifdef CONFIG_COMPAT32
 enum compat_regset {
 	REGSET_COMPAT_GPR,
 	REGSET_COMPAT_VFP,
@@ -2276,11 +2277,32 @@ long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
 
 	return ret;
 }
+#else /* !CONFIG_COMPAT32 */
+long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
+			compat_ulong_t addr, compat_ulong_t data)
+{
+	user_uintptr_t datap = (user_uintptr_t)compat_ptr(data);
+
+	switch (request) {
+	case PTRACE_PEEKMTETAGS:
+	case PTRACE_POKEMTETAGS:
+		return mte_ptrace_copy_tags(child, request, addr, datap);
+#ifdef CONFIG_ARM64_MORELLO
+	case PTRACE_PEEKCAP:
+		return morello_ptrace_peekcap(child, addr, datap);
+	case PTRACE_POKECAP:
+		return morello_ptrace_pokecap(child, addr, datap);
+#endif
+	}
+
+	return compat_ptrace_request(child, request, addr, data);
+}
+#endif /* !CONFIG_COMPAT32 */
 #endif /* CONFIG_COMPAT */
 
 const struct user_regset_view *task_user_regset_view(struct task_struct *task)
 {
-#ifdef CONFIG_COMPAT
+#ifdef CONFIG_COMPAT32
 	/*
 	 * Core dumping of 32-bit tasks or compat ptrace requests must use the
 	 * user_aarch32_view compatible with arm32. Native ptrace requests on
@@ -2295,6 +2317,7 @@ const struct user_regset_view *task_user_regset_view(struct task_struct *task)
 	return &user_aarch64_view;
 }
 
+/* Keep the 64-bit compat_arch_ptrace() in sync when modifying arch_ptrace() */
 long arch_ptrace(struct task_struct *child, long request,
 		 user_uintptr_t addr, user_uintptr_t data)
 {
