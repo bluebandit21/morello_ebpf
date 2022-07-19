@@ -82,7 +82,7 @@
 
 struct epoll_event {
 	__poll_t events;
-	__u64 data;
+	__kernel_uintptr_t data;
 } EPOLL_PACKED;
 
 #endif /* _UAPI_LINUX_EVENTPOLL_H */
