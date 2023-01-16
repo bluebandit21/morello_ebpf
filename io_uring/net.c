@@ -4,6 +4,7 @@
 #include <linux/file.h>
 #include <linux/slab.h>
 #include <linux/net.h>
+#include <linux/uio.h>
 #include <linux/compat.h>
 #include <net/compat.h>
 #include <linux/io_uring.h>
@@ -464,7 +465,9 @@ static int __io_recvmsg_copy_hdr(struct io_kiocb *req,
 		} else if (msg.msg_iovlen > 1) {
 			return -EINVAL;
 		} else {
-			if (copy_from_user(iomsg->fast_iov, msg.msg_iov, sizeof(*msg.msg_iov)))
+			void *iov = iovec_from_user(msg.msg_iov, 1, 1, iomsg->fast_iov,
+						    req->ctx->compat);
+			if (IS_ERR(iov))
 				return -EFAULT;
 			sr->len = iomsg->fast_iov[0].iov_len;
 			iomsg->free_iov = NULL;
