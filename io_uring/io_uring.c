@@ -3589,6 +3589,11 @@ static __cold int io_uring_mmap(struct file *file, struct vm_area_struct *vma)
 	if (IS_ERR(ptr))
 		return PTR_ERR(ptr);
 
+#ifdef CONFIG_CHERI_PURECAP_UABI
+	vm_flags_set(vma, VM_READ_CAPS | VM_WRITE_CAPS);
+	vma_set_page_prot(vma);
+#endif
+
 	pfn = virt_to_phys(ptr) >> PAGE_SHIFT;
 	return remap_pfn_range(vma, vma->vm_start, pfn, sz, vma->vm_page_prot);
 }
