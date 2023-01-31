@@ -5985,7 +5985,7 @@ static void print_binder_transaction_ilocked(struct seq_file *m,
 		seq_printf(m, " node %d", buffer->target_node->debug_id);
 	seq_printf(m, " size %zd:%zd data %pK\n",
 		   buffer->data_size, buffer->offsets_size,
-		   buffer->user_data);
+		   (void *)buffer->user_data);
 }
 
 static void print_binder_work_ilocked(struct seq_file *m,

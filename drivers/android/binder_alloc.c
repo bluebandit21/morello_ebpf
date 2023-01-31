@@ -190,7 +190,8 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 
 	binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 		     "%d: %s pages %pK-%pK\n", alloc->pid,
-		     allocate ? "allocate" : "free", start, end);
+		     allocate ? "allocate" : "free",
+		     (void *)start, (void *)end);
 
 	if (end <= start)
 		return 0;
@@ -250,7 +251,7 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 					    __GFP_ZERO);
 		if (!page->page_ptr) {
 			pr_err("%d: binder_alloc_buf failed for page at %pK\n",
-				alloc->pid, page_addr);
+				alloc->pid, (void *)page_addr);
 			goto err_alloc_page_failed;
 		}
 		page->alloc = alloc;
@@ -595,8 +596,8 @@ static void binder_delete_free_buffer(struct binder_alloc *alloc,
 		to_free = false;
 		binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 				   "%d: merge free, buffer %pK share page with %pK\n",
-				   alloc->pid, buffer->user_data,
-				   prev->user_data);
+				   alloc->pid, (void *)buffer->user_data,
+				   (void *)prev->user_data);
 	}
 
 	if (!list_is_last(&buffer->entry, &alloc->buffers)) {
@@ -606,24 +607,24 @@ static void binder_delete_free_buffer(struct binder_alloc *alloc,
 			binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 					   "%d: merge free, buffer %pK share page with %pK\n",
 					   alloc->pid,
-					   buffer->user_data,
-					   next->user_data);
+					   (void *)buffer->user_data,
+					   (void *)next->user_data);
 		}
 	}
 
 	if (PAGE_ALIGNED(buffer->user_data)) {
 		binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 				   "%d: merge free, buffer start %pK is page aligned\n",
-				   alloc->pid, buffer->user_data);
+				   alloc->pid, (void *)buffer->user_data);
 		to_free = false;
 	}
 
 	if (to_free) {
 		binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 				   "%d: merge free, buffer %pK do not share page with %pK or %pK\n",
-				   alloc->pid, buffer->user_data,
-				   prev->user_data,
-				   next ? next->user_data : 0);
+				   alloc->pid, (void *)buffer->user_data,
+				   (void *)prev->user_data,
+				   (void *)(next ? next->user_data : 0));
 		binder_update_page_range(alloc, 0, buffer_start_page(buffer),
 					 buffer_start_page(buffer) + PAGE_SIZE);
 	}
@@ -848,7 +849,7 @@ void binder_alloc_deferred_release(struct binder_alloc *alloc)
 			page_addr = alloc->buffer + i * PAGE_SIZE;
 			binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 				     "%s: %d: page %d at %pK %s\n",
-				     __func__, alloc->pid, i, page_addr,
+				     __func__, alloc->pid, i, (void *)page_addr,
 				     on_lru ? "on lru" : "active");
 			__free_page(alloc->pages[i].page_ptr);
 			page_count++;
@@ -868,7 +869,7 @@ static void print_binder_buffer(struct seq_file *m, const char *prefix,
 				struct binder_buffer *buffer)
 {
 	seq_printf(m, "%s %d: %pK size %zd:%zd:%zd %s\n",
-		   prefix, buffer->debug_id, buffer->user_data,
+		   prefix, buffer->debug_id, (void *)buffer->user_data,
 		   buffer->data_size, buffer->offsets_size,
 		   buffer->extra_buffers_size,
 		   buffer->transaction ? "active" : "delivered");
