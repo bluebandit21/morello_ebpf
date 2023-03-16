@@ -331,9 +331,9 @@ static int copy_io_events_to_user(struct kioctx *ctx,
 		return copy_to_user((struct compat_io_event __user *)event_array + offset,
 				    (struct compat_io_event *)ctx->ring->io_events + ring_head,
 				    sizeof(struct compat_io_event) * nr);
-	return copy_to_user(event_array + offset,
-			    ctx->ring->io_events + ring_head,
-			    sizeof(struct io_event) * nr);
+	return copy_to_user_with_ptr(event_array + offset,
+				     ctx->ring->io_events + ring_head,
+				     sizeof(struct io_event) * nr);
 }
 
 static void copy_io_event_to_ring(struct kioctx *ctx,
@@ -344,8 +344,8 @@ static void copy_io_event_to_ring(struct kioctx *ctx,
 		struct compat_io_event *compat_ring_event =
 			(struct compat_io_event *)ctx->ring->io_events + ring_idx;
 
-		compat_ring_event->data = native_event->data;
-		compat_ring_event->obj = native_event->obj;
+		compat_ring_event->data = (__u64)native_event->data;
+		compat_ring_event->obj = (__u64)native_event->obj;
 		compat_ring_event->res = native_event->res;
 		compat_ring_event->res2 = native_event->res2;
 		flush_kernel_vmap_range(compat_ring_event, sizeof(struct compat_io_event));
@@ -1240,9 +1240,10 @@ static void aio_complete(struct aio_kiocb *iocb)
 	if (++tail >= ctx->nr_events)
 		tail = 0;
 
-	pr_debug("%p[%u]: %p: %p %Lx %Lx %Lx\n", ctx, tail, iocb,
-		 (void __user *)(unsigned long)iocb->ki_res.obj,
-		 iocb->ki_res.data, iocb->ki_res.res, iocb->ki_res.res2);
+	pr_debug("%p[%u]: %p: %Lx %Lx %Lx %Lx\n", ctx, tail, iocb,
+		 (unsigned long long)iocb->ki_res.obj,
+		 (unsigned long long)iocb->ki_res.data,
+		 iocb->ki_res.res, iocb->ki_res.res2);
 
 	/* after flagging the request as done, we
 	 * must never even look at it again
@@ -2037,7 +2038,7 @@ static int __io_submit_one(struct kioctx *ctx, const struct iocb *iocb,
 		return -EFAULT;
 	}
 
-	req->ki_res.obj = user_ptr_addr(user_iocb);
+	req->ki_res.obj = (__kernel_uintptr_t)user_iocb;
 	req->ki_res.data = iocb->aio_data;
 	req->ki_res.res = 0;
 	req->ki_res.res2 = 0;
@@ -2068,7 +2069,7 @@ static int get_compat_iocb(struct iocb *iocb, const struct iocb __user *user_ioc
 	struct compat_iocb compat_iocb;
 	if (unlikely(copy_from_user(&compat_iocb, user_iocb, sizeof(struct compat_iocb))))
 		return -EFAULT;
-	iocb->aio_data = compat_iocb.aio_data;
+	iocb->aio_data = (__kernel_uintptr_t)compat_iocb.aio_data;
 	iocb->aio_key = compat_iocb.aio_key;
 	iocb->aio_rw_flags = compat_iocb.aio_rw_flags;
 	iocb->aio_lio_opcode = compat_iocb.aio_lio_opcode;
@@ -2252,7 +2253,6 @@ SYSCALL_DEFINE3(io_cancel, aio_context_t, ctx_id, struct iocb __user *, iocb,
 	struct aio_kiocb *kiocb;
 	int ret = -EINVAL;
 	u32 key;
-	u64 obj = user_ptr_addr(iocb);
 
 	ctx = lookup_ioctx(ctx_id);
 	if (unlikely(!ctx))
@@ -2271,7 +2271,7 @@ SYSCALL_DEFINE3(io_cancel, aio_context_t, ctx_id, struct iocb __user *, iocb,
 	spin_lock_irq(&ctx->ctx_lock);
 	/* TODO: use a hash or array, this sucks. */
 	list_for_each_entry(kiocb, &ctx->active_reqs, ki_list) {
-		if (kiocb->ki_res.obj == obj) {
+		if (user_ptr_is_same((struct iocb __user *)kiocb->ki_res.obj, iocb)) {
 			ret = kiocb->ki_cancel(&kiocb->rw);
 			list_del_init(&kiocb->ki_list);
 			break;
