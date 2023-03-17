@@ -65,9 +65,8 @@ struct aio_ring {
 	unsigned	incompat_features;
 	unsigned	header_length;	/* size of aio_ring */
 
-
 	struct io_event		io_events[];
-}; /* 128 bytes + ring size */
+}; /* 32 bytes + ring size */
 
 /*
  * Plugging is meant to work with larger batches of IOs. If we don't
@@ -165,6 +164,9 @@ struct kioctx {
 	struct file		*aio_ring_file;
 
 	unsigned		id;
+#ifdef CONFIG_COMPAT64
+	bool			compat;
+#endif
 };
 
 /*
@@ -217,6 +219,13 @@ struct aio_kiocb {
 	 * this is the underlying eventfd context to deliver events to.
 	 */
 	struct eventfd_ctx	*ki_eventfd;
+};
+
+struct compat_io_event {
+	__u64	data;
+	__u64	obj;
+	__s64	res;
+	__s64	res2;
 };
 
 struct compat_iocb {
@@ -280,6 +289,63 @@ static struct vfsmount *aio_mnt;
 
 static const struct file_operations aio_ring_fops;
 static const struct address_space_operations aio_ctx_aops;
+
+static inline bool aio_in_compat64(struct kioctx *ctx)
+{
+#ifdef CONFIG_COMPAT64
+	return ctx->compat;
+#else
+	return false;
+#endif
+}
+
+static inline size_t io_event_size(struct kioctx *ctx)
+{
+	return aio_in_compat64(ctx) ? sizeof(struct compat_io_event)
+				    : sizeof(struct io_event);
+}
+
+static u32 __user *aio_key_uptr(struct kioctx *ctx,
+				struct iocb __user *user_iocb)
+{
+	return aio_in_compat64(ctx) ?
+	       &((struct compat_iocb __user *)user_iocb)->aio_key :
+	       &user_iocb->aio_key;
+}
+
+static int copy_io_events_to_user(struct kioctx *ctx,
+				  struct io_event __user *event_array,
+				  long offset,
+				  unsigned int ring_head,
+				  long nr)
+{
+	if (aio_in_compat64(ctx))
+		return copy_to_user((struct compat_io_event __user *)event_array + offset,
+				    (struct compat_io_event *)ctx->ring->io_events + ring_head,
+				    sizeof(struct compat_io_event) * nr);
+	return copy_to_user(event_array + offset,
+			    ctx->ring->io_events + ring_head,
+			    sizeof(struct io_event) * nr);
+}
+
+static void copy_io_event_to_ring(struct kioctx *ctx,
+				  unsigned int ring_idx,
+				  struct io_event *native_event)
+{
+	if (aio_in_compat64(ctx)) {
+		struct compat_io_event *compat_ring_event =
+			(struct compat_io_event *)ctx->ring->io_events + ring_idx;
+
+		compat_ring_event->data = native_event->data;
+		compat_ring_event->obj = native_event->obj;
+		compat_ring_event->res = native_event->res;
+		compat_ring_event->res2 = native_event->res2;
+		flush_kernel_vmap_range(compat_ring_event, sizeof(struct compat_io_event));
+		return;
+	}
+	ctx->ring->io_events[ring_idx] = *native_event;
+	flush_kernel_vmap_range(&ctx->ring->io_events[ring_idx], sizeof(struct io_event));
+}
 
 static struct file *aio_private_file(struct kioctx *ctx, loff_t nr_pages)
 {
@@ -526,7 +592,7 @@ static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 	nr_events += 2;	/* 1 is required, 2 for good luck */
 
 	size = sizeof(struct aio_ring);
-	size += sizeof(struct io_event) * nr_events;
+	size += io_event_size(ctx) * nr_events;
 
 	nr_pages = PFN_UP(size);
 	if (nr_pages < 0)
@@ -540,7 +606,7 @@ static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 
 	ctx->aio_ring_file = file;
 	nr_events = (PAGE_SIZE * nr_pages - sizeof(struct aio_ring))
-			/ sizeof(struct io_event);
+			/ io_event_size(ctx);
 
 	ctx->ring_pages = ctx->internal_pages;
 	if (nr_pages > AIO_RING_PAGES) {
@@ -751,10 +817,13 @@ static void aio_nr_sub(unsigned nr)
 /* ioctx_alloc
  *	Allocates and initializes an ioctx.  Returns an ERR_PTR if it failed.
  */
-static struct kioctx *ioctx_alloc(unsigned nr_events)
+static struct kioctx *ioctx_alloc(unsigned nr_events, bool compat)
 {
 	struct mm_struct *mm = current->mm;
 	struct kioctx *ctx;
+	size_t event_size = (IS_ENABLED(CONFIG_COMPAT64) && compat) ?
+			    sizeof(struct compat_io_event) :
+			    sizeof(struct io_event);
 	int err = -ENOMEM;
 
 	/*
@@ -776,7 +845,7 @@ static struct kioctx *ioctx_alloc(unsigned nr_events)
 	nr_events *= 2;
 
 	/* Prevent overflows */
-	if (nr_events > (0x10000000U / sizeof(struct io_event))) {
+	if (nr_events > (0x10000000U / event_size)) {
 		pr_debug("ENOMEM: nr_events too high\n");
 		return ERR_PTR(-EINVAL);
 	}
@@ -788,6 +857,9 @@ static struct kioctx *ioctx_alloc(unsigned nr_events)
 	if (!ctx)
 		return ERR_PTR(-ENOMEM);
 
+#ifdef CONFIG_COMPAT64
+	ctx->compat = compat;
+#endif
 	ctx->max_reqs = max_reqs;
 
 	spin_lock_init(&ctx->ctx_lock);
@@ -1147,8 +1219,7 @@ static void aio_complete(struct aio_kiocb *iocb)
 
 	tail = ctx->tail;
 
-	ctx->ring->io_events[tail] = iocb->ki_res;
-	flush_kernel_vmap_range(&ctx->ring->io_events[tail], sizeof(struct io_event));
+	copy_io_event_to_ring(ctx, tail, &iocb->ki_res);
 
 	if (++tail >= ctx->nr_events)
 		tail = 0;
@@ -1207,7 +1278,8 @@ static inline void iocb_put(struct aio_kiocb *iocb)
  *	events fetched
  */
 static long aio_read_events_ring(struct kioctx *ctx,
-				 struct io_event __user *event, long nr)
+				 struct io_event __user *event, long event_idx,
+				 long nr)
 {
 	unsigned int head, tail;
 	long ret = 0;
@@ -1249,9 +1321,8 @@ static long aio_read_events_ring(struct kioctx *ctx,
 
 		avail = min(avail, nr - ret);
 
-		copy_ret = copy_to_user(event + ret,
-					&ctx->ring->io_events[head],
-					sizeof(struct io_event) * avail);
+		copy_ret = copy_io_events_to_user(ctx, event, event_idx + ret,
+						  head, avail);
 
 		if (unlikely(copy_ret)) {
 			ret = -EFAULT;
@@ -1276,7 +1347,7 @@ out:
 static bool aio_read_events(struct kioctx *ctx, long min_nr, long nr,
 			    struct io_event __user *event, long *i)
 {
-	long ret = aio_read_events_ring(ctx, event + *i, nr - *i);
+	long ret = aio_read_events_ring(ctx, event, *i, nr - *i);
 
 	if (ret > 0)
 		*i += ret;
@@ -1349,7 +1420,7 @@ SYSCALL_DEFINE2(io_setup, unsigned, nr_events, aio_context_t __user *, ctxp)
 		goto out;
 	}
 
-	ioctx = ioctx_alloc(nr_events);
+	ioctx = ioctx_alloc(nr_events, false);
 	ret = PTR_ERR(ioctx);
 	if (!IS_ERR(ioctx)) {
 		ret = put_user(ioctx->user_id, ctxp);
@@ -1380,7 +1451,7 @@ COMPAT_SYSCALL_DEFINE2(io_setup, unsigned, nr_events, compat_aio_context_t __use
 		goto out;
 	}
 
-	ioctx = ioctx_alloc(nr_events);
+	ioctx = ioctx_alloc(nr_events, true);
 	ret = PTR_ERR(ioctx);
 	if (!IS_ERR(ioctx)) {
 		/* truncating is ok because it's a user address */
@@ -1941,7 +2012,7 @@ static int __io_submit_one(struct kioctx *ctx, const struct iocb *iocb,
 		req->ki_eventfd = eventfd;
 	}
 
-	if (unlikely(put_user(KIOCB_KEY, &user_iocb->aio_key))) {
+	if (unlikely(put_user(KIOCB_KEY, aio_key_uptr(ctx, user_iocb)))) {
 		pr_debug("EFAULT: aio_key\n");
 		return -EFAULT;
 	}
@@ -2163,14 +2234,19 @@ SYSCALL_DEFINE3(io_cancel, aio_context_t, ctx_id, struct iocb __user *, iocb,
 	u32 key;
 	u64 obj = user_ptr_addr(iocb);
 
-	if (unlikely(get_user(key, &iocb->aio_key)))
-		return -EFAULT;
-	if (unlikely(key != KIOCB_KEY))
-		return -EINVAL;
-
 	ctx = lookup_ioctx(ctx_id);
 	if (unlikely(!ctx))
 		return -EINVAL;
+
+	if (unlikely(get_user(key, aio_key_uptr(ctx, iocb)))) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	if (unlikely(key != KIOCB_KEY)) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	spin_lock_irq(&ctx->ctx_lock);
 	/* TODO: use a hash or array, this sucks. */
@@ -2192,6 +2268,7 @@ SYSCALL_DEFINE3(io_cancel, aio_context_t, ctx_id, struct iocb __user *, iocb,
 		ret = -EINPROGRESS;
 	}
 
+out:
 	percpu_ref_put(&ctx->users);
 
 	return ret;
