@@ -119,6 +119,7 @@ struct kioctx {
 	/* Size of ringbuffer, in units of struct io_event */
 	unsigned		nr_events;
 
+	struct aio_ring		*ring;
 	unsigned long		mmap_base;
 	unsigned long		mmap_size;
 
@@ -351,6 +352,9 @@ static void aio_free_ring(struct kioctx *ctx)
 {
 	int i;
 
+	if (ctx->ring)
+		vunmap(ctx->ring);
+
 	/* Disconnect the kiotx from the ring file.  This prevents future
 	 * accesses to the kioctx from page migration.
 	 */
@@ -512,7 +516,6 @@ static const struct address_space_operations aio_ctx_aops = {
 
 static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 {
-	struct aio_ring *ring;
 	struct mm_struct *mm = current->mm;
 	unsigned long size, unused;
 	int nr_pages;
@@ -593,22 +596,24 @@ static int aio_setup_ring(struct kioctx *ctx, unsigned int nr_events)
 	ctx->user_id = ctx->mmap_base;
 	ctx->nr_events = nr_events; /* trusted copy */
 
-	ring = page_address(ctx->ring_pages[0]);
-	ring->nr = nr_events;	/* user copy */
-	ring->id = ~0U;
-	ring->head = ring->tail = 0;
-	ring->magic = AIO_RING_MAGIC;
-	ring->compat_features = AIO_RING_COMPAT_FEATURES;
-	ring->incompat_features = AIO_RING_INCOMPAT_FEATURES;
-	ring->header_length = sizeof(struct aio_ring);
+	ctx->ring = vmap(ctx->ring_pages, nr_pages, VM_MAP, PAGE_KERNEL);
+	if (!ctx->ring) {
+		aio_free_ring(ctx);
+		return -ENOMEM;
+	}
+
+	ctx->ring->nr = nr_events;	/* user copy */
+	ctx->ring->id = ~0U;
+	ctx->ring->head = ctx->ring->tail = 0;
+	ctx->ring->magic = AIO_RING_MAGIC;
+	ctx->ring->compat_features = AIO_RING_COMPAT_FEATURES;
+	ctx->ring->incompat_features = AIO_RING_INCOMPAT_FEATURES;
+	ctx->ring->header_length = sizeof(struct aio_ring);
+	/* Only the header is updated, so flush the first page */
 	flush_dcache_page(ctx->ring_pages[0]);
 
 	return 0;
 }
-
-#define AIO_EVENTS_PER_PAGE	(PAGE_SIZE / sizeof(struct io_event))
-#define AIO_EVENTS_FIRST_PAGE	((PAGE_SIZE - sizeof(struct aio_ring)) / sizeof(struct io_event))
-#define AIO_EVENTS_OFFSET	(AIO_EVENTS_PER_PAGE - AIO_EVENTS_FIRST_PAGE)
 
 void kiocb_set_cancel_fn(struct kiocb *iocb, kiocb_cancel_fn *cancel)
 {
@@ -686,7 +691,6 @@ static int ioctx_add_table(struct kioctx *ctx, struct mm_struct *mm)
 {
 	unsigned i, new_nr;
 	struct kioctx_table *table, *old;
-	struct aio_ring *ring;
 
 	spin_lock(&mm->ioctx_lock);
 	table = rcu_dereference_raw(mm->ioctx_table);
@@ -703,8 +707,7 @@ static int ioctx_add_table(struct kioctx *ctx, struct mm_struct *mm)
 					 * we are protected from page migration
 					 * changes ring_pages by ->ring_lock.
 					 */
-					ring = page_address(ctx->ring_pages[0]);
-					ring->id = ctx->id;
+					ctx->ring->id = ctx->id;
 					return 0;
 				}
 
@@ -1033,7 +1036,6 @@ static void user_refill_reqs_available(struct kioctx *ctx)
 {
 	spin_lock_irq(&ctx->completion_lock);
 	if (ctx->completed_events) {
-		struct aio_ring *ring;
 		unsigned head;
 
 		/* Access of ring->head may race with aio_read_events_ring()
@@ -1045,8 +1047,7 @@ static void user_refill_reqs_available(struct kioctx *ctx)
 		 * against ctx->completed_events below will make sure we do the
 		 * safe/right thing.
 		 */
-		ring = page_address(ctx->ring_pages[0]);
-		head = ring->head;
+		head = ctx->ring->head;
 
 		refill_reqs_available(ctx, head, ctx->tail);
 	}
@@ -1134,9 +1135,7 @@ static inline void iocb_destroy(struct aio_kiocb *iocb)
 static void aio_complete(struct aio_kiocb *iocb)
 {
 	struct kioctx	*ctx = iocb->ki_ctx;
-	struct aio_ring	*ring;
-	struct io_event	*ev_page, *event;
-	unsigned tail, pos, head;
+	unsigned int	tail, head;
 	unsigned long	flags;
 
 	/*
@@ -1147,17 +1146,12 @@ static void aio_complete(struct aio_kiocb *iocb)
 	spin_lock_irqsave(&ctx->completion_lock, flags);
 
 	tail = ctx->tail;
-	pos = tail + AIO_EVENTS_OFFSET;
+
+	ctx->ring->io_events[tail] = iocb->ki_res;
+	flush_kernel_vmap_range(&ctx->ring->io_events[tail], sizeof(struct io_event));
 
 	if (++tail >= ctx->nr_events)
 		tail = 0;
-
-	ev_page = page_address(ctx->ring_pages[pos / AIO_EVENTS_PER_PAGE]);
-	event = ev_page + pos % AIO_EVENTS_PER_PAGE;
-
-	*event = iocb->ki_res;
-
-	flush_dcache_page(ctx->ring_pages[pos / AIO_EVENTS_PER_PAGE]);
 
 	pr_debug("%p[%u]: %p: %p %Lx %Lx %Lx\n", ctx, tail, iocb,
 		 (void __user *)(unsigned long)iocb->ki_res.obj,
@@ -1169,10 +1163,8 @@ static void aio_complete(struct aio_kiocb *iocb)
 	smp_wmb();	/* make event visible before updating tail */
 
 	ctx->tail = tail;
-
-	ring = page_address(ctx->ring_pages[0]);
-	head = ring->head;
-	ring->tail = tail;
+	head = ctx->ring->head;
+	ctx->ring->tail = tail;
 	flush_dcache_page(ctx->ring_pages[0]);
 
 	ctx->completed_events++;
@@ -1217,8 +1209,7 @@ static inline void iocb_put(struct aio_kiocb *iocb)
 static long aio_read_events_ring(struct kioctx *ctx,
 				 struct io_event __user *event, long nr)
 {
-	struct aio_ring *ring;
-	unsigned head, tail, pos;
+	unsigned int head, tail;
 	long ret = 0;
 	int copy_ret;
 
@@ -1231,10 +1222,9 @@ static long aio_read_events_ring(struct kioctx *ctx,
 	sched_annotate_sleep();
 	mutex_lock(&ctx->ring_lock);
 
-	/* Access to ->ring_pages here is protected by ctx->ring_lock. */
-	ring = page_address(ctx->ring_pages[0]);
-	head = ring->head;
-	tail = ring->tail;
+	/* Access to ->ring here is protected by ctx->ring_lock. */
+	head = ctx->ring->head;
+	tail = ctx->ring->tail;
 
 	/*
 	 * Ensure that once we've read the current tail pointer, that
@@ -1252,23 +1242,16 @@ static long aio_read_events_ring(struct kioctx *ctx,
 
 	while (ret < nr) {
 		long avail;
-		struct io_event *ev;
-		struct page *page;
 
 		avail = (head <= tail ?  tail : ctx->nr_events) - head;
 		if (head == tail)
 			break;
 
-		pos = head + AIO_EVENTS_OFFSET;
-		page = ctx->ring_pages[pos / AIO_EVENTS_PER_PAGE];
-		pos %= AIO_EVENTS_PER_PAGE;
-
 		avail = min(avail, nr - ret);
-		avail = min_t(long, avail, AIO_EVENTS_PER_PAGE - pos);
 
-		ev = page_address(page);
-		copy_ret = copy_to_user(event + ret, ev + pos,
-					sizeof(*ev) * avail);
+		copy_ret = copy_to_user(event + ret,
+					&ctx->ring->io_events[head],
+					sizeof(struct io_event) * avail);
 
 		if (unlikely(copy_ret)) {
 			ret = -EFAULT;
@@ -1280,8 +1263,7 @@ static long aio_read_events_ring(struct kioctx *ctx,
 		head %= ctx->nr_events;
 	}
 
-	ring = page_address(ctx->ring_pages[0]);
-	ring->head = head;
+	ctx->ring->head = head;
 	flush_dcache_page(ctx->ring_pages[0]);
 
 	pr_debug("%li  h%u t%u\n", ret, head, tail);
