@@ -1146,9 +1146,8 @@ int io_send_zc(struct io_kiocb *req, unsigned int issue_flags)
 		return io_setup_async_addr(req, &__address, issue_flags);
 
 	if (zc->flags & IORING_RECVSEND_FIXED_BUF) {
-		/* TODO [PCuABI] - capability checks for uaccess */
 		ret = io_import_fixed(ITER_SOURCE, &msg.msg_iter, req->imu,
-					user_ptr_addr(zc->buf), zc->len);
+					zc->buf, zc->len);
 		if (unlikely(ret))
 			return ret;
 		msg.sg_from_iter = io_sg_from_iter;

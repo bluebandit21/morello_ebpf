@@ -628,7 +628,6 @@ static int io_pin_pbuf_ring(struct io_uring_buf_reg *reg,
 	struct page **pages;
 	int i, nr_pages;
 
-	/* TODO [PCuABI] - capability checks for uaccess */
 	pages = io_pin_pages(reg->ring_addr, ring_size, &nr_pages);
 	if (IS_ERR(pages))
 		return PTR_ERR(pages);
@@ -743,12 +742,24 @@ int io_register_pbuf_ring(struct io_ring_ctx *ctx, void __user *arg)
 	if (copy_io_uring_buf_reg_from_user(ctx, &reg, arg))
 		return -EFAULT;
 
+	if (!is_power_of_2(reg.ring_entries))
+		return -EINVAL;
+
+	/* cannot disambiguate full vs empty due to head/tail size */
+	if (reg.ring_entries >= 65536)
+		return -EINVAL;
+
+	ring_size = reg.ring_entries * (io_in_compat64(ctx) ?
+					sizeof(struct compat_io_uring_buf) :
+					sizeof(struct io_uring_buf));
+
 	if (reg.resv[0] || reg.resv[1] || reg.resv[2])
 		return -EINVAL;
 	if (reg.flags & ~IOU_PBUF_RING_MMAP)
 		return -EINVAL;
 	if (!(reg.flags & IOU_PBUF_RING_MMAP)) {
-		if (!reg.ring_addr)
+		if (!reg.ring_addr ||
+		    !check_user_ptr_read((void __user *)reg.ring_addr, ring_size))
 			return -EFAULT;
 		if (reg.ring_addr & ~PAGE_MASK)
 			return -EINVAL;
@@ -756,13 +767,6 @@ int io_register_pbuf_ring(struct io_ring_ctx *ctx, void __user *arg)
 		if (reg.ring_addr)
 			return -EINVAL;
 	}
-
-	if (!is_power_of_2(reg.ring_entries))
-		return -EINVAL;
-
-	/* cannot disambiguate full vs empty due to head/tail size */
-	if (reg.ring_entries >= 65536)
-		return -EINVAL;
 
 	if (unlikely(reg.bgid < BGID_ARRAY && !ctx->io_bl)) {
 		int ret = io_init_bl_list(ctx);
@@ -780,10 +784,6 @@ int io_register_pbuf_ring(struct io_ring_ctx *ctx, void __user *arg)
 		if (!bl)
 			return -ENOMEM;
 	}
-
-	ring_size = reg.ring_entries * (io_in_compat64(ctx) ?
-					sizeof(struct compat_io_uring_buf) :
-					sizeof(struct io_uring_buf));
 
 	if (!(reg.flags & IOU_PBUF_RING_MMAP))
 		ret = io_pin_pbuf_ring(&reg, ring_size, bl);

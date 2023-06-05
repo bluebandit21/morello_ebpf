@@ -50,7 +50,7 @@ static inline const void *io_uring_sqe_cmd(const struct io_uring_sqe *sqe)
 }
 
 #if defined(CONFIG_IO_URING)
-int io_uring_cmd_import_fixed(u64 ubuf, unsigned long len, int rw,
+int io_uring_cmd_import_fixed(void __user *ubuf, unsigned long len, int rw,
 			      struct iov_iter *iter, void *ioucmd);
 void io_uring_cmd_done(struct io_uring_cmd *cmd, ssize_t ret, ssize_t res2,
 			unsigned issue_flags);
@@ -94,8 +94,8 @@ void io_uring_cmd_mark_cancelable(struct io_uring_cmd *cmd,
 		unsigned int issue_flags);
 struct task_struct *io_uring_cmd_get_task(struct io_uring_cmd *cmd);
 #else
-static inline int io_uring_cmd_import_fixed(u64 ubuf, unsigned long len, int rw,
-			      struct iov_iter *iter, void *ioucmd)
+static inline int io_uring_cmd_import_fixed(void __user *ubuf, unsigned long len,
+			      int rw, struct iov_iter *iter, void *ioucmd)
 {
 	return -EOPNOTSUPP;
 }
