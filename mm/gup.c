@@ -3200,7 +3200,7 @@ static int internal_get_user_pages_fast(unsigned long start,
 		return -EOVERFLOW;
 	if (end > TASK_SIZE_MAX)
 		return -EFAULT;
-	if (unlikely(!access_ok((void __user *)start, len)))
+	if (unlikely(!access_ok(as_user_ptr(start), len)))
 		return -EFAULT;
 
 	nr_pinned = lockless_pages_from_mm(start, end, gup_flags, pages);
