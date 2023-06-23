@@ -31,6 +31,7 @@
 #include <linux/swapops.h>
 #include <linux/shmem_fs.h>
 #include <linux/mmu_notifier.h>
+#include <linux/mm_reserv.h>
 
 #include <asm/tlb.h>
 
@@ -1394,13 +1395,15 @@ int madvise_set_anon_name(struct mm_struct *mm, unsigned long start,
  *  -EBADF  - map exists, but area maps something that isn't a file.
  *  -EAGAIN - a kernel resource was temporarily unavailable.
  */
-int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int behavior)
+int do_madvise(struct mm_struct *mm, user_uintptr_t user_ptr, size_t len_in,
+	       int behavior, bool cap_check_skip)
 {
 	unsigned long end;
 	int error;
 	int write;
 	size_t len;
 	struct blk_plug plug;
+	unsigned long start = (ptraddr_t)user_ptr;
 
 	if (!madvise_behavior_valid(behavior))
 		return -EINVAL;
@@ -1433,14 +1436,27 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 		mmap_read_lock(mm);
 	}
 
-	/* TODO [PCuABI] - capability checks for uaccess */
 	start = untagged_addr_remote(mm, start);
 	end = start + len;
+
+	if (!cap_check_skip) {
+		if (reserv_is_supported(current->mm) &&
+		    !check_user_ptr_owning(user_ptr, len)) {
+			error = -EINVAL;
+			goto out;
+		}
+		/* Check if the range exists within the reservation with mmap lock. */
+		if (!reserv_cap_within_reserv(user_ptr, true)) {
+			error = -ERESERVATION;
+			goto out;
+		}
+	}
 
 	blk_start_plug(&plug);
 	error = madvise_walk_vmas(mm, start, end, behavior,
 			madvise_vma_behavior);
 	blk_finish_plug(&plug);
+out:
 	if (write)
 		mmap_write_unlock(mm);
 	else
@@ -1449,9 +1465,9 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 	return error;
 }
 
-SYSCALL_DEFINE3(madvise, user_uintptr_t, start, size_t, len_in, int, behavior)
+SYSCALL_DEFINE3(madvise, user_uintptr_t, user_ptr, size_t, len_in, int, behavior)
 {
-	return do_madvise(current->mm, start, len_in, behavior);
+	return do_madvise(current->mm, user_ptr, len_in, behavior, false);
 }
 
 SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
@@ -1506,7 +1522,7 @@ SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 
 	while (iov_iter_count(&iter)) {
 		ret = do_madvise(mm, user_ptr_addr(iter_iov_addr(&iter)),
-					iter_iov_len(&iter), behavior);
+					iter_iov_len(&iter), behavior, true);
 		if (ret < 0)
 			break;
 		iov_iter_advance(&iter, iter_iov_len(&iter));
