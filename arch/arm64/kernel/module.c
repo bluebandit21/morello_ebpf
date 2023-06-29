@@ -110,6 +110,14 @@ static int __init module_init_limits(void)
 }
 subsys_initcall(module_init_limits);
 
+#ifdef CONFIG_CHERI_PURECAP_UABI
+bool module_elf_check_arch(Elf_Ehdr *hdr)
+{
+	return hdr->e_machine == EM_AARCH64 &&
+		!(hdr->e_flags & EF_AARCH64_CHERI_PURECAP);
+}
+#endif
+
 void *module_alloc(unsigned long size)
 {
 	void *p = NULL;
