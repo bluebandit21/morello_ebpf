@@ -22,7 +22,7 @@ static long do_ni_syscall(struct pt_regs *regs, int scno)
 {
 #ifdef CONFIG_COMPAT32
 	long ret;
-	if (is_32bit_compat_task()) {
+	if (is_compat32_task()) {
 		ret = compat_arm_syscall(regs, scno);
 		if (ret != -ENOSYS)
 			return ret;
