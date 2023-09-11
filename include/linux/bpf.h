@@ -29,6 +29,7 @@
 #include <linux/rcupdate_trace.h>
 #include <linux/static_call.h>
 #include <linux/memcontrol.h>
+#include <linux/bpf_compat.h>
 
 struct bpf_verifier_env;
 struct bpf_verifier_log;
