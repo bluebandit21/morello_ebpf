@@ -30,6 +30,7 @@
 #include <linux/kasan.h>
 #include <linux/memremap.h>
 #include <linux/slab.h>
+#include <linux/mm_reserv.h>
 
 struct mempolicy;
 struct anon_vma;
@@ -3470,7 +3471,7 @@ static inline unsigned long stack_guard_start_gap(struct vm_area_struct *vma)
 static inline unsigned long vm_start_gap(struct vm_area_struct *vma)
 {
 	unsigned long gap = stack_guard_start_gap(vma);
-	unsigned long vm_start = vma->vm_start;
+	unsigned long vm_start = reserv_vma_reserv_start(vma);
 
 	vm_start -= gap;
 	if (vm_start > vma->vm_start)
@@ -3480,7 +3481,7 @@ static inline unsigned long vm_start_gap(struct vm_area_struct *vma)
 
 static inline unsigned long vm_end_gap(struct vm_area_struct *vma)
 {
-	unsigned long vm_end = vma->vm_end;
+	unsigned long vm_end = reserv_vma_reserv_start(vma) + reserv_vma_reserv_len(vma);
 
 	if (vma->vm_flags & VM_GROWSUP) {
 		vm_end += stack_guard_gap;

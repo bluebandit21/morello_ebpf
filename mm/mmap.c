@@ -48,6 +48,7 @@
 #include <linux/sched/mm.h>
 #include <linux/ksm.h>
 
+#include <linux/mm_reserv.h>
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
 #include <asm/tlb.h>
@@ -1655,7 +1656,7 @@ retry:
 	} else {
 		tmp = mas_prev(&mas, 0);
 		if (tmp && vm_end_gap(tmp) > gap) {
-			high_limit = tmp->vm_start;
+			high_limit = reserv_vma_reserv_start(tmp);
 			mas_reset(&mas);
 			goto retry;
 		}
@@ -1706,27 +1707,43 @@ generic_get_unmapped_area(struct file *filp, unsigned long addr,
 	struct vm_area_struct *vma, *prev;
 	struct vm_unmapped_area_info info;
 	const unsigned long mmap_end = arch_get_mmap_end(addr, len, flags);
+	unsigned long aligned_len = reserv_representable_length(len);
 
-	if (len > mmap_end - mmap_min_addr)
+	if (aligned_len > mmap_end - mmap_min_addr)
 		return -ENOMEM;
 
-	if (flags & MAP_FIXED)
+	/*
+	 * If MAP_FIXED is passed in the reservation case, the aligned range
+	 * should be either completely contained inside an existing
+	 * reservation, or completely outside (new reservation).
+	 * Let this scenario fallthrough for the corresponding checks below.
+	 */
+	if ((flags & MAP_FIXED) && !reserv_is_supported(mm))
 		return addr;
 
-	if (addr) {
+	if (addr || (flags & MAP_FIXED)) {
+		unsigned long aligned_addr;
+
 		addr = PAGE_ALIGN(addr);
-		vma = find_vma_prev(mm, addr, &prev);
-		if (mmap_end - len >= addr && addr >= mmap_min_addr &&
-		    (!vma || addr + len <= vm_start_gap(vma)) &&
-		    (!prev || addr >= vm_end_gap(prev)))
+		aligned_addr = reserv_representable_base(addr, len);
+		vma = find_vma_prev(mm, aligned_addr, &prev);
+		if (mmap_end - aligned_len >= aligned_addr && aligned_addr >= mmap_min_addr &&
+		    (!vma || aligned_addr + aligned_len <= vm_start_gap(vma)) &&
+		    (!prev || aligned_addr >= vm_end_gap(prev)))
 			return addr;
+		else if (flags & MAP_FIXED) {
+			if ((vma && reserv_vma_range_within_reserv(vma, aligned_addr, aligned_len)) ||
+			    (prev && reserv_vma_range_within_reserv(prev, aligned_addr, aligned_len)))
+				return addr;
+			return -ERESERVATION;
+		}
 	}
 
 	info.flags = 0;
-	info.length = len;
+	info.length = aligned_len;
 	info.low_limit = mm->mmap_base;
 	info.high_limit = mmap_end;
-	info.align_mask = 0;
+	info.align_mask = reserv_representable_alignment(len);
 	info.align_offset = 0;
 	return vm_unmapped_area(&info);
 }
@@ -1754,29 +1771,46 @@ generic_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	struct vm_unmapped_area_info info;
 	const unsigned long mmap_end = arch_get_mmap_end(addr, len, flags);
+	unsigned long aligned_len = reserv_representable_length(len);
 
 	/* requested length too big for entire address space */
-	if (len > mmap_end - mmap_min_addr)
+	if (aligned_len > mmap_end - mmap_min_addr)
 		return -ENOMEM;
 
-	if (flags & MAP_FIXED)
+	/*
+	 * If MAP_FIXED is passed in the reservation case, the aligned range
+	 * should be either completely contained inside an existing
+	 * reservation, or completely outside (new reservation).
+	 * Let this scenario fallthrough for the corresponding checks below.
+	 */
+	if ((flags & MAP_FIXED) && !reserv_is_supported(mm))
 		return addr;
 
 	/* requesting a specific address */
-	if (addr) {
+	if (addr || (flags & MAP_FIXED)) {
+		unsigned long aligned_addr;
+
 		addr = PAGE_ALIGN(addr);
-		vma = find_vma_prev(mm, addr, &prev);
-		if (mmap_end - len >= addr && addr >= mmap_min_addr &&
-				(!vma || addr + len <= vm_start_gap(vma)) &&
-				(!prev || addr >= vm_end_gap(prev)))
+		aligned_addr = reserv_representable_base(addr, len);
+		vma = find_vma_prev(mm, aligned_addr, &prev);
+		if (mmap_end - aligned_len >= aligned_addr && aligned_addr >= mmap_min_addr &&
+				(!vma || aligned_addr + aligned_len <= vm_start_gap(vma)) &&
+				(!prev || aligned_addr >= vm_end_gap(prev)))
 			return addr;
+		else if (flags & MAP_FIXED) {
+			if ((vma && reserv_vma_range_within_reserv(vma, aligned_addr, aligned_len)) ||
+			    (prev && reserv_vma_range_within_reserv(prev, aligned_addr, aligned_len))) {
+				return addr;
+			}
+			return -ERESERVATION;
+		}
 	}
 
 	info.flags = VM_UNMAPPED_AREA_TOPDOWN;
-	info.length = len;
+	info.length = aligned_len;
 	info.low_limit = PAGE_SIZE;
 	info.high_limit = arch_get_mmap_base(addr, mm->mmap_base);
-	info.align_mask = 0;
+	info.align_mask = reserv_representable_alignment(len);
 	info.align_offset = 0;
 	addr = vm_unmapped_area(&info);
 
