@@ -55,6 +55,20 @@ static inline int copy_from_sockptr(void *dst, sockptr_t src, size_t size)
 	return copy_from_sockptr_offset(dst, src, 0, size);
 }
 
+static inline int copy_from_sockptr_offset_with_ptr(void *dst, sockptr_t src,
+		size_t offset, size_t size)
+{
+	if (!sockptr_is_kernel(src))
+		return copy_from_user_with_ptr(dst, src.user + offset, size);
+	memcpy(dst, src.kernel + offset, size);
+	return 0;
+}
+
+static inline int copy_from_sockptr_with_ptr(void *dst, sockptr_t src, size_t size)
+{
+	return copy_from_sockptr_offset_with_ptr(dst, src, 0, size);
+}
+
 static inline int copy_struct_from_sockptr(void *dst, size_t ksize,
 		sockptr_t src, size_t usize)
 {
@@ -90,6 +104,20 @@ static inline int copy_to_sockptr_offset(sockptr_t dst, size_t offset,
 static inline int copy_to_sockptr(sockptr_t dst, const void *src, size_t size)
 {
 	return copy_to_sockptr_offset(dst, 0, src, size);
+}
+
+static inline int copy_to_sockptr_offset_with_ptr(sockptr_t dst, size_t offset,
+		const void *src, size_t size)
+{
+	if (!sockptr_is_kernel(dst))
+		return copy_to_user_with_ptr(dst.user + offset, src, size);
+	memcpy(dst.kernel + offset, src, size);
+	return 0;
+}
+
+static inline int copy_to_sockptr_with_ptr(sockptr_t dst, const void *src, size_t size)
+{
+	return copy_to_sockptr_offset_with_ptr(dst, 0, src, size);
 }
 
 static inline void *memdup_sockptr(sockptr_t src, size_t len)
