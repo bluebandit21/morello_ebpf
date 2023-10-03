@@ -72,12 +72,14 @@ obj-$(CONFIG_ARM64_MTE)			+= mte.o
 obj-$(CONFIG_ARM64_MORELLO)		+= morello.o
 obj-y					+= vdso-wrap.o
 obj-$(CONFIG_COMPAT_VDSO)		+= vdso32-wrap.o
+obj-$(CONFIG_CHERI_PURECAP_UABI)	+= vdso-purecap-wrap.o
 obj-$(CONFIG_UNWIND_PATCH_PAC_INTO_SCS)	+= patch-scs.o
 CFLAGS_patch-scs.o			+= -mbranch-protection=none
 
 # Force dependency (vdso*-wrap.S includes vdso.so through incbin)
 $(obj)/vdso-wrap.o: $(obj)/vdso/vdso.so
 $(obj)/vdso32-wrap.o: $(obj)/vdso32/vdso.so
+$(obj)/vdso-purecap-wrap.o: $(obj)/vdso/purecap/vdso.so
 
 obj-y					+= probes/
 obj-y					+= head.o
