@@ -14,7 +14,7 @@ struct sysv_shm {
 	struct list_head shm_clist;
 };
 
-long do_shmat(int shmid, char __user *shmaddr, int shmflg, unsigned long *addr,
+long do_shmat(int shmid, char __user *shmaddr, int shmflg, user_uintptr_t *user_ptr,
 	      unsigned long shmlba);
 bool is_file_shm_hugepages(struct file *file);
 void exit_shm(struct task_struct *task);
@@ -25,7 +25,7 @@ struct sysv_shm {
 };
 
 static inline long do_shmat(int shmid, char __user *shmaddr,
-			    int shmflg, unsigned long *addr,
+			    int shmflg, user_uintptr_t *user_ptr,
 			    unsigned long shmlba)
 {
 	return -ENOSYS;
