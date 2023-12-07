@@ -208,6 +208,107 @@ static int copy_io_uring_getevents_arg_from_user(struct io_ring_ctx *ctx,
 	return 0;
 }
 
+static int get_compat64_io_uring_params(struct io_uring_params *params,
+					const void __user *user_params)
+{
+	struct compat_io_uring_params compat_params;
+
+	if (copy_from_user(&compat_params, user_params, sizeof(compat_params)))
+		return -EFAULT;
+
+	params->sq_entries = compat_params.sq_entries;
+	params->cq_entries = compat_params.cq_entries;
+	params->flags = compat_params.flags;
+	params->sq_thread_cpu = compat_params.sq_thread_cpu;
+	params->sq_thread_idle = compat_params.sq_thread_idle;
+	params->features = compat_params.features;
+	params->wq_fd = compat_params.wq_fd;
+	memcpy(params->resv, compat_params.resv, sizeof(params->resv));
+
+	params->sq_off.head = compat_params.sq_off.head;
+	params->sq_off.tail = compat_params.sq_off.tail;
+	params->sq_off.ring_mask = compat_params.sq_off.ring_mask;
+	params->sq_off.ring_entries = compat_params.sq_off.ring_entries;
+	params->sq_off.flags = compat_params.sq_off.flags;
+	params->sq_off.dropped = compat_params.sq_off.dropped;
+	params->sq_off.array = compat_params.sq_off.array;
+	params->sq_off.resv1 = compat_params.sq_off.resv1;
+	params->sq_off.user_addr = (__kernel_uintptr_t)compat_ptr(compat_params.sq_off.user_addr);
+
+	params->cq_off.head = compat_params.cq_off.head;
+	params->cq_off.tail = compat_params.cq_off.tail;
+	params->cq_off.ring_mask = compat_params.cq_off.ring_mask;
+	params->cq_off.ring_entries = compat_params.cq_off.ring_entries;
+	params->cq_off.overflow = compat_params.cq_off.overflow;
+	params->cq_off.cqes = compat_params.cq_off.cqes;
+	params->cq_off.flags = compat_params.cq_off.flags;
+	params->cq_off.resv1 = compat_params.cq_off.resv1;
+	params->cq_off.user_addr = (__kernel_uintptr_t)compat_ptr(compat_params.cq_off.user_addr);
+
+	return 0;
+}
+
+static int copy_io_uring_params_from_user(struct io_uring_params *params,
+					  const void __user *src)
+{
+	if (IS_ENABLED(CONFIG_COMPAT64) && in_compat_syscall())
+		return get_compat64_io_uring_params(params, src);
+	if (copy_from_user_with_ptr(params, src, sizeof(*params)))
+		return -EFAULT;
+	return 0;
+}
+
+static int set_compat64_io_uring_params(void __user *user_params,
+					const struct io_uring_params *params)
+{
+	struct compat_io_uring_params compat_params;
+
+	memset(&compat_params, 0, sizeof(compat_params));
+
+	compat_params.sq_entries = params->sq_entries;
+	compat_params.cq_entries = params->cq_entries;
+	compat_params.flags = params->flags;
+	compat_params.sq_thread_cpu = params->sq_thread_cpu;
+	compat_params.sq_thread_idle = params->sq_thread_idle;
+	compat_params.features = params->features;
+	compat_params.wq_fd = params->wq_fd;
+
+	compat_params.sq_off.head = params->sq_off.head;
+	compat_params.sq_off.tail = params->sq_off.tail;
+	compat_params.sq_off.ring_mask = params->sq_off.ring_mask;
+	compat_params.sq_off.ring_entries = params->sq_off.ring_entries;
+	compat_params.sq_off.flags = params->sq_off.flags;
+	compat_params.sq_off.dropped = params->sq_off.dropped;
+	compat_params.sq_off.array = params->sq_off.array;
+	compat_params.sq_off.user_addr = (__u64)params->sq_off.user_addr;
+
+	compat_params.cq_off.head = params->cq_off.head;
+	compat_params.cq_off.tail = params->cq_off.tail;
+	compat_params.cq_off.ring_mask = params->cq_off.ring_mask;
+	compat_params.cq_off.ring_entries = params->cq_off.ring_entries;
+	compat_params.cq_off.overflow = params->cq_off.overflow;
+	compat_params.cq_off.cqes = params->cq_off.cqes;
+	compat_params.cq_off.flags = params->cq_off.flags;
+	compat_params.cq_off.resv1 = params->cq_off.resv1;
+	compat_params.cq_off.user_addr = (__u64)params->cq_off.user_addr;
+
+	if (copy_to_user(user_params, &compat_params, sizeof(compat_params)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int copy_io_uring_params_to_user(struct io_ring_ctx *ctx,
+					void __user *dst,
+					const struct io_uring_params *params)
+{
+	if (io_in_compat64(ctx))
+		return set_compat64_io_uring_params(dst, params);
+	if (copy_to_user_with_ptr(dst, params, sizeof(*params)))
+		return -EFAULT;
+	return 0;
+}
+
 struct sock *io_uring_get_socket(struct file *file)
 {
 #if defined(CONFIG_UNIX)
@@ -2745,8 +2846,9 @@ static void io_pages_free(struct page ***pages, int npages)
 }
 
 static void *__io_uaddr_map(struct page ***pages, unsigned short *npages,
-			    unsigned long uaddr, size_t size)
+			    void __user *uptr, size_t size)
 {
+	unsigned long uaddr = user_ptr_addr(uptr);
 	struct page **page_array;
 	unsigned int nr_pages;
 	void *page_addr;
@@ -2756,6 +2858,8 @@ static void *__io_uaddr_map(struct page ***pages, unsigned short *npages,
 
 	if (uaddr & (PAGE_SIZE - 1) || !size)
 		return ERR_PTR(-EINVAL);
+	if (!check_user_ptr_rw(uptr, size))
+		return ERR_PTR(-EFAULT);
 
 	nr_pages = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	if (nr_pages > USHRT_MAX)
@@ -2801,14 +2905,14 @@ err:
 	return page_to_virt(page_array[0]);
 }
 
-static void *io_rings_map(struct io_ring_ctx *ctx, unsigned long uaddr,
+static void *io_rings_map(struct io_ring_ctx *ctx, void __user *uaddr,
 			  size_t size)
 {
 	return __io_uaddr_map(&ctx->ring_pages, &ctx->n_ring_pages, uaddr,
 				size);
 }
 
-static void *io_sqes_map(struct io_ring_ctx *ctx, unsigned long uaddr,
+static void *io_sqes_map(struct io_ring_ctx *ctx, void __user *uaddr,
 			 size_t size)
 {
 	return __io_uaddr_map(&ctx->sqe_pages, &ctx->n_sqe_pages, uaddr,
@@ -3895,7 +3999,7 @@ static __cold int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 	if (!(ctx->flags & IORING_SETUP_NO_MMAP))
 		rings = io_mem_alloc(size);
 	else
-		rings = io_rings_map(ctx, p->cq_off.user_addr, size);
+		rings = io_rings_map(ctx, (void __user *)p->cq_off.user_addr, size);
 
 	if (IS_ERR(rings))
 		return PTR_ERR(rings);
@@ -3921,7 +4025,7 @@ static __cold int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 	if (!(ctx->flags & IORING_SETUP_NO_MMAP))
 		ptr = io_mem_alloc(size);
 	else
-		ptr = io_sqes_map(ctx, p->sq_off.user_addr, size);
+		ptr = io_sqes_map(ctx, (void __user *)p->sq_off.user_addr, size);
 
 	if (IS_ERR(ptr)) {
 		io_rings_free(ctx);
@@ -4139,7 +4243,7 @@ static __cold int io_uring_create(unsigned entries, struct io_uring_params *p,
 			IORING_FEAT_RSRC_TAGS | IORING_FEAT_CQE_SKIP |
 			IORING_FEAT_LINKED_FILE | IORING_FEAT_REG_REG_RING;
 
-	if (copy_to_user(params, p, sizeof(*p))) {
+	if (copy_io_uring_params_to_user(ctx, params, p)) {
 		ret = -EFAULT;
 		goto err;
 	}
@@ -4190,7 +4294,7 @@ static long io_uring_setup(u32 entries, struct io_uring_params __user *params)
 	struct io_uring_params p;
 	int i;
 
-	if (copy_from_user(&p, params, sizeof(p)))
+	if (copy_io_uring_params_from_user(&p, params))
 		return -EFAULT;
 	for (i = 0; i < ARRAY_SIZE(p.resv); i++) {
 		if (p.resv[i])
