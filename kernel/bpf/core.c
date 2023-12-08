@@ -1058,6 +1058,8 @@ bpf_jit_binary_alloc(unsigned int proglen, u8 **image_ptr,
 
 	/* Leave a random number of instructions before BPF code. */
 	*image_ptr = &hdr->image[start];
+	/* The actual start of the JIT code */
+	printk("%s JIT loc=%#lx\n", __func__, *image_ptr);
 
 	return hdr;
 }
