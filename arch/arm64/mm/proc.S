@@ -92,12 +92,11 @@ SYM_FUNC_START(cpu_do_suspend)
 	mrs	c9, ctpidr_el0
 	mrs	c10, rctpidr_el0
 	mrs	c11, ddc_el0
-	mrs	c12, rddc_el0
-	mrs	c13, cid_el0
-	mrs	c14, cvbar_el1
+	mrs	c12, cid_el0
+	mrs	c13, cvbar_el1
 	stp	c9, c10, [x0, #CPU_CTX_CREGS]
 	stp	c11, c12, [x0, #CPU_CTX_CREGS + 32]
-	stp	c13, c14, [x0, #CPU_CTX_CREGS + 64]
+	str	c13, [x0, #CPU_CTX_CREGS + 64]
 #else /* CONFIG_ARM64_MORELLO */
 	mrs	x2, tpidr_el0
 	mrs	x8, vbar_el1
@@ -170,10 +169,9 @@ SYM_FUNC_START(cpu_do_resume)
 	msr	rctpidr_el0, c3
 	ldp	c2, c3, [x0, #CPU_CTX_CREGS + 32]
 	msr	ddc_el0, c2
-	msr	rddc_el0, c3
-	ldp	c2, c3, [x0, #CPU_CTX_CREGS + 64]
-	msr	cid_el0, c2
-	msr	cvbar_el1, c3
+	msr	cid_el0, c3
+	ldr	c2, [x0, #CPU_CTX_CREGS + 64]
+	msr	cvbar_el1, c2
 #else /* CONFIG_ARM64_MORELLO */
 	msr	tpidr_el0, x2
 	msr	vbar_el1, x9

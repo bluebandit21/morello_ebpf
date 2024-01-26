@@ -1472,7 +1472,7 @@ static int morello_get(struct task_struct *target,
 	MORELLO_STATE_COPY_VAL_TAG(out, ctpidr, morello_state->ctpidr);
 
 	MORELLO_STATE_COPY_VAL_TAG(out, rcsp, regs->rcsp);
-	MORELLO_STATE_COPY_VAL_TAG(out, rddc, morello_state->rddc);
+	MORELLO_STATE_COPY_VAL_TAG(out, rddc, regs->rddc);
 	MORELLO_STATE_COPY_VAL_TAG(out, rctpidr, morello_state->rctpidr);
 
 	MORELLO_STATE_COPY_VAL_TAG(out, cid, morello_state->cid);
@@ -1514,7 +1514,7 @@ static int morello_set(struct task_struct *target,
 	MORELLO_STATE_BUILD_CAP(new_state, ctpidr, morello_state->ctpidr);
 
 	MORELLO_STATE_BUILD_CAP(new_state, rcsp, regs->rcsp);
-	MORELLO_STATE_BUILD_CAP(new_state, rddc, morello_state->rddc);
+	MORELLO_STATE_BUILD_CAP(new_state, rddc, regs->rddc);
 	MORELLO_STATE_BUILD_CAP(new_state, rctpidr, morello_state->rctpidr);
 
 	MORELLO_STATE_BUILD_CAP(new_state, cid, morello_state->cid);

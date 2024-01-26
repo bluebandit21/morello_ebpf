@@ -5,7 +5,7 @@
 #include <asm/morello.h>
 
 #define NR_CTX_REGS 13
-#define NR_CTX_CREGS 6
+#define NR_CTX_CREGS 5
 #define NR_CALLEE_SAVED_REGS 12
 
 /*

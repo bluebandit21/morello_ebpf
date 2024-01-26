@@ -85,6 +85,7 @@ int main(void)
   DEFINE(S_CREGS,		offsetof(struct pt_regs, cregs));
   DEFINE(S_CSP,			offsetof(struct pt_regs, csp));
   DEFINE(S_PCC,			offsetof(struct pt_regs, pcc));
+  DEFINE(S_RDDC,		offsetof(struct pt_regs, rddc));
 #endif
   DEFINE(PT_REGS_SIZE,		sizeof(struct pt_regs));
   BLANK();

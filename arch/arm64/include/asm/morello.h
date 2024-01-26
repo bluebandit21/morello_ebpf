@@ -19,7 +19,6 @@ struct morello_state {
 	uintcap_t	ctpidr;
 	uintcap_t	rctpidr;
 	uintcap_t	ddc;
-	uintcap_t	rddc;
 	uintcap_t	cid;
 	unsigned long	cctlr;
 };

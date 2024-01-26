@@ -208,6 +208,7 @@ struct pt_regs {
 	uintcap_t csp;
 	uintcap_t rcsp;
 	uintcap_t pcc;
+	uintcap_t rddc;
 #endif
 };
 

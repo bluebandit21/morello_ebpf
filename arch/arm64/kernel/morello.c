@@ -172,9 +172,7 @@ void morello_thread_init_user(void)
 	write_cap_sysreg(0, rctpidr_el0);
 
 	write_cap_sysreg(ddc, ddc_el0);
-	write_cap_sysreg(0, rddc_el0);
 	morello_state->ddc = ddc;
-	morello_state->rddc = (uintcap_t)0;
 
 	write_cap_sysreg(0, cid_el0);
 	morello_state->cid = (uintcap_t)0;
@@ -205,7 +203,6 @@ void morello_thread_save_user_state(struct task_struct *tsk)
 
 	/* (R)CTPIDR is handled by task_save_user_tls */
 	morello_state->ddc = read_cap_sysreg(ddc_el0);
-	morello_state->rddc = read_cap_sysreg(rddc_el0);
 	morello_state->cid = read_cap_sysreg(cid_el0);
 	morello_state->cctlr = read_sysreg(cctlr_el0);
 }
@@ -216,7 +213,6 @@ void morello_thread_restore_user_state(struct task_struct *tsk)
 
 	/* (R)CTPIDR is handled by task_restore_user_tls */
 	write_cap_sysreg(morello_state->ddc, ddc_el0);
-	write_cap_sysreg(morello_state->rddc, rddc_el0);
 	write_cap_sysreg(morello_state->cid, cid_el0);
 	write_sysreg(morello_state->cctlr, cctlr_el0);
 }

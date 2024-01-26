@@ -239,6 +239,9 @@ alternative_cb_end
 
 	mrs	c26, celr_el1
 	str	c26, [sp, #S_PCC]
+
+	mrs	c27, rddc_el0
+	str	c27, [sp, #S_RDDC]
 #endif
 
 	.if	\el == 0
@@ -490,6 +493,9 @@ alternative_else_nop_endif
 	msr	spsr_el1, x22
 
 #ifdef CONFIG_ARM64_MORELLO
+	ldr	c25, [sp, #S_RDDC]
+	msr	rddc_el0, c25
+
 	morello_merge_c_x 26, x21		// merge PC into PCC
 	msr	celr_el1, c26
 
