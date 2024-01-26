@@ -309,6 +309,10 @@ alternative_else_nop_endif
 
 	scs_load_current
 	.else
+#ifdef CONFIG_ARM64_MORELLO
+	mrs	c22, rcsp_el0
+	str	c22, [sp, #S_CSP + 16]
+#endif
 	add	x21, sp, #PT_REGS_SIZE
 	get_current_task tsk
 	.endif /* \el == 0 */
@@ -476,6 +480,11 @@ alternative_else_nop_endif
 	mte_set_user_gcr tsk, x0, x1
 
 	apply_ssbd 0, x0, x1
+#ifdef CONFIG_ARM64_MORELLO
+	.else
+	ldr	c25, [sp, #S_CSP + 16]
+	msr	rcsp_el0, c25
+#endif
 	.endif
 
 	msr	spsr_el1, x22
