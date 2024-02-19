@@ -598,16 +598,6 @@ alternative_endif
 	.endm
 
 /*
- * Return a pointer to tsk's pt_regs.
- */
-	.macro	get_task_pt_regs, rd:req, tsk:req
-	/* See task_pt_regs() in processor.h */
-	ldr	\rd, [\tsk, #TSK_STACK]
-	add	\rd, \rd, #THREAD_SIZE
-	sub	\rd, \rd, #PT_REGS_SIZE
-	.endm
-
-/*
  * Offset ttbr1 to allow for 48-bit kernel VAs set with 52-bit PTRS_PER_PGD.
  * orr is used as it can cover the immediate value (and is idempotent).
  * In future this may be nop'ed out when dealing with 52-bit kernel VAs.
