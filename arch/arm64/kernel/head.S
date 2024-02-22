@@ -598,8 +598,9 @@ SYM_INNER_LABEL(init_el2, SYM_L_LOCAL)
 	bic	x1, x1, #CPTR_EL2_TC
 	msr	cptr_el2, x1
 	isb
-	/* Disable PCC/DDC base offset and other capability-related features */
-	msr	cctlr_el2, xzr
+	/* Seal CLR / require a sealed target for capability branches */
+	mov	x9, #CCTLR_ELx_SBL
+	msr	cctlr_el2, x9
 
 	/*
 	 * Capability exception entry/return is now enabled, as a result we

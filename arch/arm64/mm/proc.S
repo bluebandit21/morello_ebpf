@@ -498,8 +498,9 @@ SYM_FUNC_START(__cpu_setup)
 	orr	x9, x9, CPACR_EL1_CEN
 	msr	cpacr_el1, x9
 	isb
-	/* Disable PCC/DDC base offset and other capability-related features */
-	msr	cctlr_el1, xzr
+	/* Seal CLR / require a sealed target for capability branches */
+	mov	x9, #CCTLR_ELx_SBL
+	msr	cctlr_el1, x9
 
 	/*
 	 * Allow controlling the Morello-defined capability tag load/store
