@@ -1023,6 +1023,11 @@ void __weak bpf_jit_free_exec(void *addr)
 	module_memfree(addr);
 }
 
+void *__weak bpf_jit_alloc_stack()
+{
+	return NULL;
+}
+
 struct bpf_binary_header *
 bpf_jit_binary_alloc(unsigned int proglen, u8 **image_ptr,
 		     unsigned int alignment,
@@ -1061,6 +1066,12 @@ bpf_jit_binary_alloc(unsigned int proglen, u8 **image_ptr,
 	/* The actual start of the JIT code */
 	printk("%s JIT loc=%#lx\n", __func__, *image_ptr);
 
+	/*
+	 * Save the bpf SP in the header; it's the easiest way to ensure the
+	 * memory is free'd at the same time as the image in bpf_jit_binary_free
+	 */
+	hdr->stack = bpf_jit_alloc_stack();
+
 	return hdr;
 }
 
@@ -1068,6 +1079,8 @@ void bpf_jit_binary_free(struct bpf_binary_header *hdr)
 {
 	u32 size = hdr->size;
 
+	if (hdr->stack)
+		bpf_jit_free_exec(hdr->stack);
 	bpf_jit_free_exec(hdr);
 	bpf_jit_uncharge_modmem(size);
 }

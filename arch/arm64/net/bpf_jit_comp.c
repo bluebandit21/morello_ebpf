@@ -24,6 +24,8 @@
 
 #include "bpf_jit.h"
 
+#define BPF_STACK_SZ (PAGE_SIZE * 16)
+
 #define TMP_REG_1 (MAX_BPF_JIT_REG + 0)
 #define TMP_REG_2 (MAX_BPF_JIT_REG + 1)
 #define TCALL_CNT (MAX_BPF_JIT_REG + 2)
@@ -79,6 +81,7 @@ struct jit_ctx {
 	int exentry_idx;
 	__le32 *image;
 	int image_size;
+	void *stack;
 	u32 stack_size;
 	int fpb_offset;
 };
@@ -1513,6 +1516,25 @@ struct arm64_jit_data {
 	struct jit_ctx ctx;
 };
 
+void *bpf_jit_alloc_stack()
+{
+	void *sp = __vmalloc_node(BPF_STACK_SZ, PAGE_SIZE, THREADINFO_GFP,
+				  NUMA_NO_NODE, __builtin_return_address(0));
+
+	if (!sp) {
+		printk("%s stack allocation failed\n", __func__);
+		return NULL;
+	}
+	printk("%s allocated stack at:%#lx-%lx size:%d\n", __func__,
+	       sp, sp+BPF_STACK_SZ, BPF_STACK_SZ);
+	if (((uintptr_t)sp & 0xF) != 0)
+		printk("%s stack is NOT 16B aligned\n", __func__);
+	if (((uintptr_t)sp & 0xFFF) != 0)
+		printk("%s stack is NOT 4k page aligned\n", __func__);
+
+	return kasan_reset_tag(sp);
+}
+
 struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 {
 	int prog_size, extable_size, extable_align, extable_offset;
@@ -1602,6 +1624,11 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 		prog = orig_prog;
 		goto out_off;
 	}
+
+	if (header->stack == NULL) {
+		goto out_off;
+	}
+	ctx.stack = header->stack;
 
 	/* 2. Now, the actual pass. */
 
