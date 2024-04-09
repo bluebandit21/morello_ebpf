@@ -41,6 +41,8 @@
 #define check_imm19(imm) check_imm(19, imm)
 #define check_imm26(imm) check_imm(26, imm)
 
+static int PROLOGUE_OFFSET = 0;
+
 /* Map BPF registers to A64 registers */
 static const int bpf2a64[] = {
 	/* return value from in-kernel function, and exit value from eBPF */
@@ -282,9 +284,6 @@ static bool is_lsi_offset(int offset, int scale)
 /* Offset of nop instruction in bpf prog entry to be poked */
 #define POKE_OFFSET (BTI_INSNS + 1)
 
-/* Tail call offset to jump into */
-#define PROLOGUE_OFFSET (BTI_INSNS + 2 + PAC_INSNS + 8)
-
 static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 {
 	const struct bpf_prog *prog = ctx->prog;
@@ -297,7 +296,6 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	const u8 tcc = bpf2a64[TCALL_CNT];
 	const u8 fpb = bpf2a64[FP_BOTTOM];
 	const int idx0 = ctx->idx;
-	int cur_offset;
 
 	/*
 	 * BPF prog stack layout
@@ -354,12 +352,7 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 		/* Initialize tail_call_cnt */
 		emit(A64_MOVZ(1, tcc, 0, 0), ctx);
 
-		cur_offset = ctx->idx - idx0;
-		if (cur_offset != PROLOGUE_OFFSET) {
-			pr_err_once("PROLOGUE_OFFSET = %d, expected %d!\n",
-				    cur_offset, PROLOGUE_OFFSET);
-			return -1;
-		}
+		PROLOGUE_OFFSET = ctx->idx - idx0;
 
 		/* BTI landing pad for the tail call, done with a BR */
 		emit_bti(A64_BTI_J, ctx);
