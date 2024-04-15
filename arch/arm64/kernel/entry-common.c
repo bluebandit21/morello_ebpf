@@ -384,10 +384,25 @@ static inline void fp_user_discard(void)
 	}
 }
 
-UNHANDLED(el1t, 64, sync)
-UNHANDLED(el1t, 64, irq)
-UNHANDLED(el1t, 64, fiq)
-UNHANDLED(el1t, 64, error)
+asmlinkage void noinstr el1t_64_sync_handler(struct pt_regs *regs)
+{
+	el1h_64_sync_handler(regs);
+}
+
+asmlinkage void noinstr el1t_64_irq_handler(struct pt_regs *regs)
+{
+	el1h_64_irq_handler(regs);
+}
+
+asmlinkage void noinstr el1t_64_fiq_handler(struct pt_regs *regs)
+{
+	el1h_64_fiq_handler(regs);
+}
+
+asmlinkage void noinstr el1t_64_error_handler(struct pt_regs *regs)
+{
+	el1h_64_error_handler(regs);
+}
 
 static void noinstr el1_abort(struct pt_regs *regs, unsigned long esr)
 {
