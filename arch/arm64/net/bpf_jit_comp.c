@@ -284,6 +284,21 @@ static bool is_lsi_offset(int offset, int scale)
 /* Offset of nop instruction in bpf prog entry to be poked */
 #define POKE_OFFSET (BTI_INSNS + 1)
 
+static inline void zero_gpr(struct jit_ctx *ctx)
+{
+	/*
+	 * Try generating this without repeating yourself using
+	 * emit(A64_MOVZ(1, A64_R(0), 0, 0), ctx);
+	 * ...
+	 */
+	int base = 0xd2800000; // mov x0, #0
+	//	   0xd2800001; // mov x1, #0
+	//	   ...
+	//	   0xd280001d; // mov x29, #0
+	for(int i=0; i<=29; i++)
+		emit(base+i, ctx);
+}
+
 static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 {
 	const struct bpf_prog *prog = ctx->prog;
