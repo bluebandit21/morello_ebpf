@@ -303,10 +303,6 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 {
 	const struct bpf_prog *prog = ctx->prog;
 	const bool is_main_prog = !bpf_is_subprog(prog);
-	const u8 r6 = bpf2a64[BPF_REG_6];
-	const u8 r7 = bpf2a64[BPF_REG_7];
-	const u8 r8 = bpf2a64[BPF_REG_8];
-	const u8 r9 = bpf2a64[BPF_REG_9];
 	const u8 fp = bpf2a64[BPF_REG_FP];
 	const u8 tcc = bpf2a64[TCALL_CNT];
 	const u8 fpb = bpf2a64[FP_BOTTOM];
@@ -355,10 +351,11 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	emit(A64_MOV(1, A64_FP, A64_SP), ctx);
 
 	/* Save callee-saved registers */
-	emit(A64_PUSH(r6, r7, A64_SP), ctx);
-	emit(A64_PUSH(r8, r9, A64_SP), ctx);
-	emit(A64_PUSH(fp, tcc, A64_SP), ctx);
-	emit(A64_PUSH(fpb, A64_R(28), A64_SP), ctx);
+	emit(A64_PUSH(A64_R(19), A64_R(20), A64_SP), ctx);
+	emit(A64_PUSH(A64_R(21), A64_R(22), A64_SP), ctx);
+	emit(A64_PUSH(A64_R(23), A64_R(24), A64_SP), ctx);
+	emit(A64_PUSH(A64_R(25), A64_R(26), A64_SP), ctx);
+	emit(A64_PUSH(A64_R(27), A64_R(28), A64_SP), ctx);
 
 	/* Set up BPF prog stack base register */
 	emit(A64_MOV(1, fp, A64_SP), ctx);
@@ -664,24 +661,16 @@ static void build_plt(struct jit_ctx *ctx)
 static void build_epilogue(struct jit_ctx *ctx)
 {
 	const u8 r0 = bpf2a64[BPF_REG_0];
-	const u8 r6 = bpf2a64[BPF_REG_6];
-	const u8 r7 = bpf2a64[BPF_REG_7];
-	const u8 r8 = bpf2a64[BPF_REG_8];
-	const u8 r9 = bpf2a64[BPF_REG_9];
-	const u8 fp = bpf2a64[BPF_REG_FP];
-	const u8 fpb = bpf2a64[FP_BOTTOM];
 
 	/* We're done with BPF stack */
 	emit(A64_ADD_I(1, A64_SP, A64_SP, ctx->stack_size), ctx);
 
-	/* Restore x27 and x28 */
-	emit(A64_POP(fpb, A64_R(28), A64_SP), ctx);
-	/* Restore fs (x25) and x26 */
-	emit(A64_POP(fp, A64_R(26), A64_SP), ctx);
-
-	/* Restore callee-saved register */
-	emit(A64_POP(r8, r9, A64_SP), ctx);
-	emit(A64_POP(r6, r7, A64_SP), ctx);
+	/* Restore x19-x28 */
+	emit(A64_POP(A64_R(27), A64_R(28), A64_SP), ctx);
+	emit(A64_POP(A64_R(25), A64_R(26), A64_SP), ctx);
+	emit(A64_POP(A64_R(23), A64_R(24), A64_SP), ctx);
+	emit(A64_POP(A64_R(21), A64_R(22), A64_SP), ctx);
+	emit(A64_POP(A64_R(19), A64_R(20), A64_SP), ctx);
 
 	/* Restore FP/LR registers */
 	emit(A64_POP(A64_FP, A64_LR, A64_SP), ctx);
