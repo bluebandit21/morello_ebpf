@@ -26,6 +26,9 @@
 
 #define BPF_STACK_SZ (PAGE_SIZE * 16)
 
+#define PERM_SYS_REG            __CHERI_CAP_PERMISSION_ACCESS_SYSTEM_REGISTERS__
+#define PERM_EXECUTIVE          __ARM_CAP_PERMISSION_EXECUTIVE__
+
 #define TMP_REG_1 (MAX_BPF_JIT_REG + 0)
 #define TMP_REG_2 (MAX_BPF_JIT_REG + 1)
 #define TCALL_CNT (MAX_BPF_JIT_REG + 2)
@@ -266,6 +269,84 @@ static bool is_lsi_offset(int offset, int scale)
 	return true;
 }
 
+void bpf_enter_sandbox(void *sp, void *ret_addr, int image_size)
+{
+	void * __capability ddc;
+	void * __capability rcsp;
+	void * __capability rddc;
+	void * __capability fnp;
+	void * __capability clr;
+	void *lr;
+
+	/*
+	 * All new caps are explicitly derived from kernel DDC; since EL1 DDC is
+	 * entirely unrestricted, this gives us a blank cap to use as a base
+	 */
+	ddc = cheri_ddc_get();
+
+	/* Setup RCSP to top of new stack created in vmalloc region */
+	rcsp = cheri_address_set(ddc, (u64)sp);
+	rcsp = cheri_bounds_set(rcsp, BPF_STACK_SZ);
+	rcsp = cheri_offset_set(rcsp, BPF_STACK_SZ);
+	asm volatile("msr rcsp_el0, %[RCSP]" :: [RCSP] "C" (rcsp));
+
+	/* Restrict RDDC to the vmalloc region */
+	rddc = cheri_address_set(ddc, VMALLOC_START);
+	rddc = cheri_bounds_set(rddc, VMALLOC_END - VMALLOC_START);
+	rddc = cheri_perms_clear(rddc, PERM_EXECUTIVE | PERM_SYS_REG);
+	asm volatile("msr rddc_el0, %[RDDC]" :: [RDDC] "C" (rddc));
+
+	/*
+	 * To switch to restricted mode with BLRR/BRR, we must have a sealed
+	 * function ptr with a cleared executive permission bit (PERM_EXECUTIVE)
+	 *
+	 * We want to return from bpf_enter_sandbox in restricted mode, so use
+	 * link reg (x30) for the function ptr
+	 *
+	 * Setting the bounds to LR + image_size isn't precise, but it's good
+	 * enough for now. That restricts PCC/execution to roughly the current
+	 * bpf program. To support bpf to bpf and bpf tail calls within the
+	 * vmalloc region needs further work.
+	 *
+	 * PERM_SYS_REG: remove access to privileged system regs e.g. mmu,
+	 * interupts mgmt, processor reset
+	 */
+	__asm__ volatile("mov %[LR], x30" :[LR] "=r" (lr): );
+	fnp = cheri_address_set(ddc, (u64)lr);
+	fnp = cheri_bounds_set(fnp, image_size);
+	fnp = cheri_perms_clear(fnp, PERM_EXECUTIVE | PERM_SYS_REG);
+	fnp = cheri_sentry_create(fnp);
+
+	/*
+	 * To exit restricted mode, we need to do ret(clr)
+	 *
+	 * If we use BLRR we'd create a sealed c30/clr pointing to the
+	 * instruction directly after the BLRR - that's no good to return
+	 * back here to the end of this function
+	 *
+	 * Use BRR and manually craft the CLR to be able to return somewhere
+	 * we actually want to return to when exiting restricted mode -
+	 * currently that's the start of the epilogue, directly after the
+	 * ret(clr) instruction
+	 *
+	 * Note: since we're using BRR to exit instead of a normal RET, we're
+	 * relying on the code gen here to not create a stack frame; otherwise
+	 * we end up branching out before restoring the stack. Since this
+	 * is a leaf function that doesn't allocate or use stack space we're
+	 * ok, however this function would be less liable to break in pure
+	 * assembly
+	 */
+	clr = cheri_address_set(ddc, (u64)ret_addr);
+	clr = cheri_sentry_create(clr);
+	__asm__ volatile(
+		"mov c30, %[CLR]\n"
+		"brr %[FNP]" /* Branch to restricted mode instead of RET */
+		::
+		[CLR] "r" (clr),
+		[FNP] "r" (fnp)
+	);
+}
+
 /* generated prologue:
  *      bti c // if CONFIG_ARM64_BTI_KERNEL
  *      mov x9, lr
@@ -360,6 +441,26 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	emit(A64_PUSH(A64_R(23), A64_R(24), A64_SP), ctx);
 	emit(A64_PUSH(A64_R(25), A64_R(26), A64_SP), ctx);
 	emit(A64_PUSH(A64_R(27), A64_R(28), A64_SP), ctx);
+
+	/* Setup and enter restricted mode compartment:
+	 *	arg1: new SP
+	 *	arg2: PCC-relative address of where we want to return to on
+	 *	      exiting restricted mode
+	 *	arg3: image size
+	 */
+	emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx);
+	/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
+	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4), ctx);
+	emit_a64_mov_i(0, A64_R(2), ctx->image_size, ctx);
+	emit_call((const u64)bpf_enter_sandbox, ctx);
+	/* ----> Now we're in restricted mode */
+
+	/*
+	 * Since not all regs are banked between Restricted/Executive, zero
+	 * GPRs to avoid leaking kernel regs to bpf code
+	 * We don't really mind the way around i.e R -> E.
+	 */
+	zero_gpr(ctx);
 
 	/* Set up BPF prog stack base register */
 	emit(A64_MOV(1, fp, A64_SP), ctx);
@@ -666,8 +767,12 @@ static void build_epilogue(struct jit_ctx *ctx)
 {
 	const u8 r0 = bpf2a64[BPF_REG_0];
 
-	/* We're done with BPF stack */
-	emit(A64_ADD_I(1, A64_SP, A64_SP, ctx->stack_size), ctx);
+	/*
+	 * Exit from restricted mode compartment
+	 * CLR should point to the instruction below this one
+	 */
+	emit(0xc2c253c0, ctx); // ret clr
+	/* ----> Now we're back in executive mode */
 
 	/* Restore x19-x28 */
 	emit(A64_POP(A64_R(27), A64_R(28), A64_SP), ctx);
@@ -1646,6 +1751,9 @@ skip_init_ctx:
 		prog = orig_prog;
 		goto out_off;
 	}
+
+	/* Update now we know the actual size */
+	ctx.epilogue_offset = ctx.idx;
 
 	build_epilogue(&ctx);
 	build_plt(&ctx);
