@@ -1,18 +1,693 @@
-Linux kernel
-============
+RFC                                                                   April 2024
+Arm Ltd                                                             Zachary Leaf
 
-There are several guides for kernel developers and users. These guides can
-be rendered in a number of formats, like HTML and PDF. Please read
-Documentation/admin-guide/README.rst first.
+                    Compartmentalising eBPF with Morello
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.  The formatted documentation can also be read online at:
+Abstract
 
-    https://www.kernel.org/doc/html/latest/
+  This document describes how a hybrid compartment enabled by the Morello
+  architecture/CHERI can be used to sandbox execution of JIT'd eBPF code in the
+  Linux kernel.
 
-There are various text files in the Documentation/ subdirectory,
-several of them using the Restructured Text markup notation.
+  Since Morello is hardware based it can provide much more lightweight
+  compartmentalisation, isolation and sandboxing, compared to other pure
+  software approaches.
 
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+  Further, it can offer greater guarantees of memory safety when combined with
+  the existing security model used by eBPF. Where previous verifier bypass
+  exploits in eBPF would result in arbitrary kernel read/writes and privilege
+  escalation, these attacks would instead result in hardware exceptions due to
+  out of bounds memory accesses.
+
+RFC patchset
+
+  The attached patch series is a first draft enabling compartmentalisation of
+  JIT'd eBPF using a hybrid model. Restricted/Executive mode is used for domain
+  transitions.
+
+  This is a working proof of concept and outlines a general approach and
+  technique to isolate eBPF. Some of the limitations and further work required
+  is found below. In particular one major technical problem remains unsolved,
+  and further work is needed on this.
+
+What is eBPF
+
+  eBPF is a relatively new kernel feature that allows extending the operating
+  system, much like kernel modules. Compared with kernel modules, eBPF programs
+  are meant to come with much stronger safety and reliability guarantees.
+
+  eBPF programs also run differently to kernel modules in that eBPF is its own
+  unique architecture and byte code that runs inside a virtual machine in the
+  kernel. Programs can either be run via the eBPF interpreter, or JIT compiled
+  into native code.
+
+  Since by design eBPF programs run in the kernel context, they're fast -
+  avoiding syscalls and context switches, and calling directly into the kernel.
+  This is important as eBPF programs are event based and may run frequently, for
+  instance on every incoming packet.
+
+  There are now many use cases for eBPF, from the original - writing complex
+  packet filtering logic, to live tracing, monitoring and security programs.
+
+Threat Model
+
+  eBPF has had a number of CVEs[1] in recent years. The current security model
+  relies on accurate analysis by the eBPF verifier, a pre-runtime static
+  analyser that checks if programs are safe to run. As evidenced by the number
+  of CVEs relating to errors in the verifier[2], this kind of verification does
+  not currently offer a strong guarantee of safety. The verification is not a
+  formal one, rather a long list of checks. With the complexity of modern eBPF,
+  it is likely the verifier could not ever be provably safe, without significant
+  restrictions on the capabilities of eBPF itself. Further details about the
+  verifier and attacks against it can be found in the section below.
+
+  Since eBPF runs in the kernel context, a large number of these CVEs therefore
+  allow arbitrary kernel read/writes leading to local privilege escalation. This
+  combined with Spectre speculation attacks[3][4] has resulted in the kernel and
+  all major Linux distributions disabling unprivileged eBPF execution by
+  default[5]. Many eBPF maintainers have also deprecated any new efforts to
+  support unprivileged execution due to the difficulty securing it[6][7].
+
+  The CAP_BPF permission was introduced in v5.8 to attempt to limit possible
+  damage from the previously required CAP_SYS_ADMIN permission and to prevent
+  "pointer leaks and arbitrary kernel memory access"[8]. While this is an
+  improvement over the wide capabilities granted by CAP_SYS_ADMIN, it remains
+  vulnerable to verifier bypasses and hence privilege escalation from CAP_BPF to
+  root.
+
+  Using Morello could therefore strengthen the CAP_BPF model as well as allow
+  safer usage of unprivileged eBPF. This includes re-enabling several existing
+  use cases e.g. user socket filtering and access control, as well as open up
+  the possibility for new use cases, such as eBPF seccomp filters[9][10].
+
+eBPF Verifier
+
+                                                  ┌────────┐  ┌────────────────┐
+                             BPF_PROG_LOAD     ┌─►│  JIT   ├─►│[native aarch64]│
+┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐ │  └────────┘  └────────────────┘
+│  [C]   ├─►│ clang  ├─►│ [eBPF] ├─►│verifier├─┤
+└────────┘  └────────┘  └────────┘  └────────┘ │  ┌─────────────┐
+                                               └─►│ interpreter │
+                                                  └─────────────┘
+
+  A simplified flow of writing and loading eBPF in the kernel is as follows:
+
+  1. Compile a subset of C with clang -target=bpf into eBPF byte code
+  2. Request to load the program into the kernel
+  3. eBPF byte code is run through the verifier
+      - The verifier steps through all possible execution paths and
+        instructions, keeping track of state
+          - Control flow checks (e.g. no infinite loops, no unreachable
+            instructions)
+          - Individual instruction checks, both static (e.g. divide by zero) +
+            dynamic (out of range accesses, stack + register checks)
+          - No leaking kernel ptrs to memory shared with userspace (e.g. through
+            eBPF maps) etc...
+      - Once all checks are passed, code is determined/marked as "safe"
+  4. eBPF is then loaded into the kernel, either JIT compiled or as raw eBPF
+     bytecode, ready to run in the kernel context when triggered
+
+  Both JIT'd programs or interpreted programs are run from a memory area marked
+  as executable inside the kernel address space. On arm64[11], x86 and some
+  other archs this area is also set to RO.
+
+  The rules of the verifier do not allow bpf programs to access any arbitrary
+  kernel memory, they are restricted to calling:
+    - other bpf programs
+    - access to limited + approved kernel memory info and data only via bpf
+      helper functions
+    - access to limited and explicitly allowed kernel functions marked as kfuncs
+
+  Attempted accesses outside these bounds should be caught by the verifier
+  before a bpf program is loaded into the kernel.
+
+                kernel memory
+    ┌──────────────────────────────────────────────────────────────────┐
+    │                                     executable memory (RO)       │
+    │            ┌──────────┐          ┌────────┬─────────┬────────┐   │
+    │            │          │          │        │         │        │   │
+    │            │  KFUNCS  │  allowed │  BPF   │         │  BPF   │   │
+    │            │          │◄─────────┤  PROG  ◄─────────►  PROG  │   │
+    │            └──────────┘          │        │         │        │   │
+    │                                  ├────────┘         └────────┤   │
+    │                                  │                           │   │
+    │                                  │              ┌--------┐   │   │
+    │                ┌-----------┐     │  load denied '        '   │   │
+    │                ' arbitrary '◄----X──────────────'  BPF   '   │   │
+    │                '    r/w    '     │  by verifier '  PROG  '   │   │
+    │                └-----------┘     │              '        '   │   │
+    │                                  │              └--------┘   │   │
+    │                                  │                           │   │
+    │   ┌─────────┐◄───┐               │    ┌────────┐             │   │
+    │   └─────────┘    ├───────────┐   │    │        │             │   │
+    │                  │    BPF    │◄──┼────┤  BPF   │             │   │
+    │   ┌─────────┐◄───┤  HELPERS  │   │    │  PROG  │             │   │
+    │   └─────────┘    └───────────┘   │    │        │             │   │
+    │                                  └────┴────────┴─────────────┘   │
+    │                                                                  │
+    └──────────────────────────────────────────────────────────────────┘
+
+Verifier Bypass
+
+  Attacks on the verifier generally share a common theme - tricking the verifier
+  into marking unsafe code as safe. This has been done a number of ways,
+  generally by faulty control flow graph logic in the verifier[12], abusing type
+  bounds[13], adding unsafe offsets to pointers[14] and others[2].
+
+  Since bpf programs exist in the kernel address space, once the program has
+  passed the verifier and been loaded into the kernel, there are no further
+  barriers or run time checks on kernel memory accesses. This results in
+  arbitrary read/writes usually leading to privilege escalation.
+
+                kernel memory
+    ┌──────────────────────────────────────────────────────────────────┐
+    │                                     executable memory (RO)       │
+    │            ┌──────────┐          ┌────────┬─────────┬────────┐   │
+    │            │          │          │        │         │        │   │
+    │            │  KFUNCS  │  allowed │  BPF   │         │  BPF   │   │
+    │            │          │◄─────────┤  PROG  ◄─────────►  PROG  │   │
+    │            └──────────┘          │        │         │        │   │
+    │                                  ├────────┘         └────────┤   │
+    │                                  │                           │   │
+    │                                  │              ┌────────┐   │   │
+    │               ┌───────────┐      │   verifier   │        │   │   │
+    │               │ arbitrary │◄─────┼──────────────┤  BPF   │   │   │
+    │               │    r/w    │      │    bypass    │  PROG  │   │   │
+    │               └───────────┘      │              │        │   │   │
+    │                                  │              └────────┘   │   │
+    │                                  │                           │   │
+    │   ┌─────────┐◄───┐               │    ┌────────┐             │   │
+    │   └─────────┘    ├───────────┐   │    │        │             │   │
+    │                  │    BPF    │◄──┼────┤  BPF   │             │   │
+    │   ┌─────────┐◄───┤  HELPERS  │   │    │  PROG  │             │   │
+    │   └─────────┘    └───────────┘   │    │        │             │   │
+    │                                  └────┴────────┴─────────────┘   │
+    │                                                                  │
+    └──────────────────────────────────────────────────────────────────┘
+
+  This ability to call directly into the kernel is somewhat by design. Any
+  mechanism such as putting programs in a different address space would result
+  in additional latency from context switches. When running as packet filtering
+  code for example, this additional latency may be unacceptable.
+
+  In theory, Morello compartments provide a much more lightweight way to enforce
+  memory isolation. Depending on the performance impact (yet to be determined)
+  this compartmentalisation method could be deployed only on some eBPF program
+  types as determined by the sysadmin -or- eBPF wide to provide robustness to
+  the overall system.
+
+Hybrid Mode
+
+  Morello supports two execution modes - 'hybrid' mode and 'pure capability' aka
+  'purecap' mode. In purecap mode, all pointers are capabilities and accesses
+  are checked against the specified bounds and permissions within that
+  capability attached to each address. In hybrid mode, pointers remain 64-bits
+  unless specifically annotated with the `__capability` flag in code, resulting
+  in a mix of capability pointers and standard pointers.
+
+  Importantly for hybrid mode, and perhaps counter-intuitively, capability
+  checks are still made for all normal, standard non-capability pointer memory
+  accesses. A standard pointer will derive a capability from the Default Data
+  Capability (DDC) and memory accesses will be checked against that. Similarly,
+  the Program Counter is extended with a capability (PCC). When the instruction
+  at the PCC is fetched for decoding and execution it's checked against the
+  corresponding capability. Any access out of bounds, permission or tag issue
+  results in a capability fault exception.
+
+  One benefit of this is existing aarch64 programs can benefit from capability
+  checks without having to recompile that program to use capabilities. In hybrid
+  mode, by setting the DDC register of the processor we can limit memory
+  accesses of all normal pointers. By setting a capability in PCC we can limit
+  what code can be executed. This provides us with a simple mechanism to form
+  the basis of a hybrid compartment.
+
+  For more information on hybrid mode see the Morello Examples repo on
+  GitLab[15].
+
+Hybrid Compartment
+
+  Being able to restrict and run existing aarch64 code with Morello maps nicely
+  onto the arm64 eBPF JIT engine. The eBPF JIT converts eBPF instructions into
+  plain aarch64 assembly, which can be restricted using the features of hybrid
+  mode to limit memory access and code execution. The Morello Linux kernel on
+  which these changes are based is also a hybrid kernel (supporting a pure
+  capability userspace)[16]. This is therefore a relatively simple approach with
+  fairly minimal changes required.
+
+  A rough model of compartmentalising eBPF with hybrid mode looks like the
+  below. The bounds of DDC and PCC are restricted to a memory area forming the
+  hybrid compartment, allowing intra-bpf calls. Any memory accesses or branches
+  outside of the approved kfuncs or bpf helper calls are disallowed.
+
+                kernel memory                hybrid compartment
+    ┌─────────────────────────────────┬─────────────────────────────┬──┐
+    │                                 │┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼│  │
+    │            ┌──────────┐         │┼────────┼─────────┼────────┼│  │
+    │            │          │         ││        │         │        ││  │
+    │            │  KFUNCS  │  allowed││  BPF   │         │  BPF   ││  │
+    │            │          │◄────────┼│  PROG  ◄─────────►  PROG  ││  │
+    │            └──────────┘         ││        │         │        ││  │
+    │                                 │┼────────┘         └────────┼│  │
+    │                                 ││                           ││  │
+    │                                 ││              ┌────────┐   ││  │
+    │                      capability ├┘   verifier   │        │   ││  │
+    │                 fault/exception │X◄─────────────┤  BPF   │   ││  │
+    │                                 ├┐    bypass    │  PROG  │   ││  │
+    │                                 ││              │        │   ││  │
+    │                                 ││              └────────┘   ││  │
+    │                                 ││                           ││  │
+    │   ┌─────────┐◄───┐              ││    ┌────────┐             ││  │
+    │   └─────────┘    ├───────────┐  ││    │        │             ││  │
+    │                  │    BPF    │◄─┼┼────┤  BPF   │             ││  │
+    │   ┌─────────┐◄───┤  HELPERS  │  ││    │  PROG  │             ││  │
+    │   └─────────┘    └───────────┘  ││    │        │             ││  │
+    │                                 │┼────┼────────┼─────────────┼│  │
+    │                                 │┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼│  │
+    └─────────────────────────────────┴─────────────────────────────┴──┘
+
+  This type of compartment has in general proved impractical for most use cases,
+  since many accesses in and out of the compartment are usually required, e.g.
+  library calls such as libc, and controlling the compartment boundary in terms
+  of these accesses can be difficult. In the case of eBPF, the majority of code
+  and accesses are internal. There are no library calls and each program type
+  has strict limited access to a small number of appropriate bpf helpers and
+  kfuncs that are pre-defined in the verifier[17][18].
+
+  eBPF therefore turns out to be a good use case for this type of compartment.
+  Since the accesses outside the compartment are limited and well defined this
+  should allow for easier domain transitions between the compartment and the
+  kernel.
+
+Moving the eBPF stack
+
+  Currently JIT'd eBPF reuses the kernel stack. In order for the
+  compartmentalised eBPF program to access the stack, a separate stack must be
+  allocated inside the compartment. This also allows for clean separation and
+  isolation of kernel and eBPF stacks.
+
+  Allocation and free'ing of this new stack is done at the same time as the
+  memory for the JIT'd binary image; this way the eBPF stack lives for the
+  lifetime of the eBPF program.
+
+Domain Transitions via Restricted/Executive mode
+
+  The Restricted/Executive mode of the Morello hardware provides a simple way to
+  handle domain transitions aka switching between the kernel and the hybrid
+  compartment.
+
+  Restricted mode introduces banked alternative registers RDDC_EL0, RCSP_EL0 and
+  RCTPIDR_EL0, controlled via the EXECUTIVE bit in PCC[19]. Executive mode has
+  access to the Restricted regs, but not vice versa. Hence the compartment
+  manager, in this case the kernel, can setup a compartment in the Restricted
+  regs, such as providing a new stack pointer in RSCP_EL0, before atomically
+  switching execution to Restricted mode.
+
+  Switching into Restricted mode is done via a BRR/BLRR instruction[20] on a
+  sealed (non-modifiable capability) function pointer with the EXECUTIVE bit
+  unset.
+
+  Atomically returning back to Executive mode can be done simply with RET(CLR),
+  where CLR is a sealed link register capability with the EXECUTIVE bit set.
+
+  For further details about Restricted/Executive mode see the Morello Examples
+  repo on Gitlab[21] and the Morello Architecture Reference Manual[19].
+
+Hybrid Compartment Structure
+
+  The RFC patches implement a hybrid compartment structure roughly as below.
+  Every JIT'd eBPF program is placed between a prologue/epilogue as generated by
+  the bpf_jit_comp.c:build_{prologue,epilogue} functions.
+
+                        ┌───
+               prologue │1              |
+                        │2              | executive mode
+                        │3              |
+                        │4 brr(fnp)─┐   | // fnp=5 clr=y
+                        │5          ▼---┼-----------
+                        │6              |
+                        ├───            |
+                   main │7              |
+                        │8              |
+                        │9              | restricted mode
+                        │.              |
+                        │.              |
+                        │.              |
+                        ├───            |
+               epilogue │x ret(clr)─┐   | // clr=y
+                        │y          ▼---┼-----------
+                        │z              |
+                        │.              | executive mode
+                        │.              |
+                        └───
+
+  The prologue is comprised of two parts. The first part labeled above as 1,2,3
+  is mostly adhering to the Arm64 Procedure Call Standard (AAPCS) e.g.
+  preserving the FP, LR and regs r19-r28 on the original kernel stack.
+
+  After this, we setup the compartment. The JIT compiler does not provide
+  encoding for Morello instructions, so this is done by branching to
+  bpf_enter_sandbox(). bpf_enter_sandbox() sets up the Restricted mode regs
+  which includes setting the new stack pointer RSCP_EL0 and restricting RDDC_EL0
+  as appropriate.
+
+  To restrict the PCC the sealed function pointer (FNP) used as the target of
+  BRR instruction has its bounds and permissions restricted. fnp points back
+  into the prologue (labeled above as '5') where we can continue with setting up
+  the eBPF stack in Restricted mode after we've atomically switched stacks to
+  the new value we put in RCSP_EL0.
+
+  Before switching execution to Restricted via BRR(FNP), we manually create a
+  sealed capability link register (CLR) to point to the instruction (labeled
+  above as 'y') near the top of the epilogue. Since the JIT compiler does
+  multiple passes, we're able to calculate this as a fixed offset. Since we
+  don't yet know where the JIT code will be loaded, the CLR can be described as
+  a PCC relative offset using an ADR instruction. Having the EXECUTIVE bit set
+  on CLR switches execution back to Executive mode when used as the target of
+  RET.
+
+  Since not all registers are banked, after the transition from Executive to
+  Restricted, care must be taken to sanitise all general purpose regs to avoid
+  leaking kernel regs to potentially untrusted eBPF code in main.
+
+Exception Handling
+
+  Usually kernel exceptions are handled by el1h_64_xyz_handler() where 'h'
+  indicates that the stack pointer in SP_EL1 is being used[22].
+
+  As per the Morello Architecture Reference manual:
+
+      "If the PE is in Restricted and an exception is taken from the current
+       Exception level, exception entry uses the same exception vector as an
+       exception taken from the current Exception level with SP_EL0" [23]
+
+  This means for code running in Restricted mode at EL1, exceptions will use the
+  el1t_64_xyz_handler(), where the 't' suffix indicates SP_EL0 is being used.
+
+  Since el1t_xyz_handler's are currently unhandled in the kernel, the RFC
+  patches reuse the existing exception handlers.
+
+  No special exception handling here is required. Should an eBPF program make an
+  out of bounds access or attempt to execute code out of bounds, this will
+  result in a capability fault. Since kernel state may have been changed by the
+  eBPF program, e.g. via various bpf helper functions, we cannot reliably or
+  easily unwind this state back to a known good state. In this case, as per
+  existing behaviour of eBPF the only safe thing to do is to kill the kernel
+  thread resulting in a kernel Oops, for example:
+
+[66105.333338] Unable to handle kernel paging request at virtual address ffff800080168b58
+[66105.341538] Mem abort info:
+[66105.344368]   ESR = 0x0000000086000028
+[66105.348389]   EC = 0x21: IABT (current EL), IL = 32 bits
+[66105.353824]   SET = 0, FnV = 0
+[66105.356911]   EA = 0, S1PTW = 0
+[66105.360056]   FSC = 0x28: capability tag fault
+[...]
+[66105.383898] Internal error: Oops: 0000000086000028 [#3] PREEMPT SMP
+[66105.390152] Modules linked in:
+[66105.393194] CPU: 0 PID: 3273 Comm: bpf_print_sp Not tainted 6.7.0-gcf3037d47c40 #4
+[66105.402312] Hardware name: ARM LTD Morello System Development Platform, BIOS EDK II Jul 19 2023
+[66105.410994] pstate: 20400009 (nzCv daif +PAN -UAO -TCO -DIT -SSBS ISA=A64 BTYPE=--)
+[66105.418637] pc : bpf_trace_printk+0x0/0x13c
+[66105.422812] lr : bpf_prog_015bce9d80f8185c+0xf8/0x128
+[...]
+[66105.502369] pcc: 0:ff7f40004ddc8cac:ffff800080168b58
+[66105.507319] clr: 0:0000000000000000:ffff800082618d60
+[66105.512268] csp: 0:0000000000000000:0000000000000000
+[...]
+[66105.649892] Call trace:
+[66105.652325]  bpf_trace_printk+0x0/0x13c
+[66105.662228] ---[ end trace 0000000000000000 ]---
+
+  Breaking this down we can see that we've faulted at the start (0x0) of the
+  bpf_trace_printk() bpf helper function. The link reg shows we got there from a
+  bpf program. Fault status code (FSC) shows a capability tag fault, and looking
+  at PCC we can see the first tag bit is unset (invalid).
+
+  What has happened is that bpf_trace_printk() exists outside the compartment.
+  When the branch is based on an immediate or X register value like here, the
+  program counter is updated with the address of bpf_trace_printk() via
+  BranchToAddr[24], and the PCC is modified/updated with CapSetValue[25].
+
+    BranchToAddr(bits(N) target, BranchType branch_type)
+    [...]
+        assert N == 64 && !UsingAArch32();
+        _PC = target<63:0>;
+        PCC = CapSetValue(PCC, target<63:0>);
+    return;
+
+  In this case, the value of bpf_trace_printk() is so far out of bounds it is
+  unrepresentable and therefore the tag value is cleared by CapSetValue. This
+  then results in a capability tag fault on the instruction fetch in the next
+  cycle.
+
+  This is a bit of a special case. Where the instruction is outside of
+  capability bounds but representable we would expect a standard out of bounds
+  capability fault.
+
+  Note: bpf_trace_printk is a bpf helper function and should work, however the
+  RFC patches currently do not include any trampolines or mechanism to call out
+  of the compartment to approved helper functions or kfuncs.
+
+  Also note that due to zero'ing regs on entering the compartment we've lost the
+  ability to get a full kernel call trace.
+
+Current State & Future Work
+
+  The attached RFC patches roughly implement the below:
+
+                kernel memory                hybrid compartment
+    ┌─────────────────────────────────┬─────────────────────────────┬──┐
+    │                                 │┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼│  │
+    │            ┌──────────┐         │┼──┼────────┼──────┼────────┼│  │
+    │            │          │         ├┘  │        │      │        ││  │
+    │            │  KFUNCS  │         │X◄─┤  BPF   X◄────►X  BPF   ││  │
+    │            │          │         ├┐  │  PROG  │      │  PROG  ││  │
+    │            └──────────┘         ││  │        │      │        ││  │
+    │                                 ││  └────────┘      └────────┼│  │
+    │                                 ││                           ││  │
+    │                                 ││              ┌────────┐   ││  │
+    │                    capability   ├┘   verifier   │        │   ││  │
+    │               fault/exceptions  │X◄─────────────┤  BPF   │   ││  │
+    │                                 ├┐    bypass    │  PROG  │   ││  │
+    │                                 ││              │        │   ││  │
+    │                                 ││              └────────┘   ││  │
+    │                                 ││                           ││  │
+    │   ┌─────────┐◄───┐              ││    ┌────────┐             ││  │
+    │   └─────────┘    ├───────────┐  ├┘    │        │             ││  │
+    │                  │    BPF    │  │X◄───┤  BPF   │             ││  │
+    │   ┌─────────┐◄───┤  HELPERS  │  ├┐    │  PROG  │             ││  │
+    │   └─────────┘    └───────────┘  ││    │        │             ││  │
+    │                                 │┼────┼────────┼─────────────┼│  │
+    │                                 │┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼│  │
+    └─────────────────────────────────┴─────────────────────────────┴──┘
+
+      RDDC_EL0: bounds set to vmalloc memory region
+      RCSP_EL0: points to new stack allocated in vmalloc region
+           PCC: bounds set to the JIT'd program binary image
+
+  For simplicity's sake in the RFC patch set, the current DDC bounds is setup to
+  be the entire vmalloc memory region in the kernel[26]. This is a wide memory
+  area where JIT'd eBPF programs are already allocated. The eBPF stack is also
+  allocated in this region. The PCC bounds are set to be roughly the code area
+  taken up by the eBPF binary image. This means tail calls between two bpf
+  programs and general intra-bpf calls are not currently possible. Future work
+  should include either a specific carve out for all eBPF programs and their
+  stacks or individual compartments per program with a mechanism for intra-bpf
+  calls.
+
+  There is also currently no mechanism to allow access to bpf helpers and
+  kfuncs. It's highly likely this will have to involve a full domain transition
+  back to Executive to allow the bpf helpers to access the kernel memory they
+  require. The bpf helper must then return with RETR or B(L)RR back into
+  Restricted mode. Capabilities to allow access to these helpers must therefore
+  be made available to the compartment before branching into Restricted mode.
+
+  This will look roughly something like the below:
+
+      // Restricted
+      blr <helper_cap>
+      // Executive
+      str clr, [...]
+      ...
+      ldr clr, [...]
+      retr clr
+      // Restricted
+
+  Filtering of arguments to the bpf helper functions and kfuncs, especially
+  those containing pointers is one of the most problematic and currently
+  unsolved aspects. There is a risk of using bpf helper functions as gadgets to
+  perform operations not allowed inside the compartment.
+
+  For example the bpf_strncmp helper allows passing any arbitrary pointer and
+  passing it to strncmp:
+
+      BPF_CALL_3(bpf_strncmp, const char *, s1, u32, s1_sz, const char *, s2)
+      {
+          return strncmp(s1, s2, s1_sz);
+      }
+
+  This could conceivably be used to methodically move through and map out kernel
+  memory based on the location of known strings.
+
+  bpf_strtol is even more concerning, as this takes an arbitrary pointer, reads
+  it as a string and writes the long int equivalent to another arbitrary
+  pointer. This is essentially an arbitrary read and write primitive for all of
+  kernel memory.
+
+  The next step for anyone continuing this work is to first resolve these
+  issues. In particular the argument filtering seems particularly difficult to
+  resolve. Access to these kinds of bpf helpers that provide wide ranging
+  capabilities will have to be limited in some way.
+
+Future uArch changes
+
+  Currently to exit from Executive mode we have to manually craft a CLR that
+  points to the instruction directly after the RET(CLR). It is possible to
+  determine this as a fixed offset due to the multi-pass JIT compilation,
+  however the process could be simplified with new instruction that returns back
+  to Executive via a label instead of a register. For example, RETE #4 would
+  switch to Executive from the next instruction, avoiding the need to retain CLR
+  through the call stack. This would require strong landing pads similar to BTI
+  to verify and check switching states is allowed. This also works well in a JIT
+  context where we can guarantee that user controlled code could not generate
+  RETE instructions or landing pads.
+
+Other Future Work
+
+  An alternative option to the hybrid compartment would be to extend the JIT
+  engine to output Morello/capability instructions and make the resulting
+  program purecap. The engineering effort involved in this would be significant.
+  After adding the instruction encodings of the new Morello instructions and
+  then using that to generate correct and secure purecap code would be possible
+  but non-trivial.
+
+  In this scenario where the kernel remains hybrid, there exists mismatch
+  between the kernel and eBPF ABI. Since the eBPF interface remains a C
+  interface using standard pointers, translating this to use capabilities and
+  make appropriate restrictions would be difficult. Thus, a purecap eBPF but
+  hybrid kernel, or even vice versa, a purecap kernel but hybrid eBPF may not be
+  viable.
+
+  A purecap kernel and purecap eBPF would provide the strongest and most
+  straightforward model of compartmentalisation, however this comes with a very
+  high engineering cost. The hybrid model therefore is attractive for the
+  potential to add security with relative ease of implementation and being
+  relatively simple to integrate into existing systems.
+
+  To further extend the hybrid model and mitigate vulnerabilities in the JIT
+  compiler and verifier itself, it might be useful to run these inside separate
+  compartments. Since these are all parsing user input they may benefit from
+  some level of isolation.
+
+General Limitations
+
+  A hybrid compartment solves the issue of bpf programs accessing other areas of
+  memory outside of the compartment, but it cannot easily solve the inverse -
+  exploits elsewhere in the system executing data within the compartment as
+  code.
+
+  A general problem with JIT compilation is there exists a user controlled area
+  of executable data in memory. If an attacker can control a return address they
+  can jump to and execute this data.
+
+                         kernel memory
+    ┌─────────────────────────────────┬──┬──────────┬──────┬────┬───┬──┐
+    │                                 │┼┼│executable│memory│(RO)│┼┼┼│  │
+    │                                 │┼─┴──────────┼──────┴────┴──┼│  │
+    │                                 ││  JIT'd     │              ││  │
+    │                                 ││  BPF PROG  │              ││  │
+    │         ┌─────────┐ jump/branch ││  ┌──────┐  │              ││  │
+    │         │ exploit ├─────────────┼┼──► data │  │              ││  │
+    │         └─────────┘             ││  └──────┘  │              ││  │
+    │                                 ││            │              ││  │
+    │                                 │┼────────────┘              ││  │
+    │                                 ││                           ││  │
+    │                                 ││                           ││  │
+    │                                 │┼───────────────────────────┼│  │
+    │                                 │┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼│  │
+    └─────────────────────────────────┴─────────────────────────────┴──┘
+
+  A hybrid Morello model could solve the issue but it would require 2
+  compartments:
+
+      1. eBPF compartment
+      2. !eBPF aka "everything else"
+
+  Currently the DDC and PCC in the PCuABI kernel are completely unrestricted.
+  Except for a case with a clear cut, simple linear address space, setting the
+  bounds for the second compartment aka the kernel becomes difficult if not
+  impossible to do with how bounds encoding currently works in Morello and with
+  a hybrid kernel. The limited bounds encoding of Morello is limiting factor in
+  this. A purecap kernel should make mitigation of this type of exploit much
+  easier.
+
+  Note: the arm64 kernel does contain some mitigations already against this
+  problem. The addresses of JIT images are already randomised and marked as
+  RO[11], although JIT spraying can be used to bypass this. In addition Branch
+  Target Identification (BTI)[27] has also been enabled for JIT'd images[28],
+  although BTI is not available on the Morello platform which is based on
+  ARMv8.2-A
+
+  The /proc/sys/net/core/bpf_jit_harden option[29][30] can also be used to
+  effectively nullify this attack entirely, although with some overhead. All
+  JIT'd 32b and 64b constants are "blinded" in memory by saving them XOR'd with
+  a random number. This operation is then undone at execution.
+
+LTP Test
+
+  An LTP test that can be used to test current operation of the RFC patches is
+  available at:
+
+  https://git.morello-project.org/zdleaf/morello-linux-test-project/-/commits/morello/bpf_compartment
+
+  This is a simple test to make a single call to the bpf helper function
+  bpf_trace_printk and print the current SP. Given the current lack of
+  mechanism/trampoline to call helper functions, this should result in a
+  capability tag fault and test fail. Oops details are printed in dmesg.
+
+Thanks
+
+  Thanks to everyone at Arm and Cambridge University for their help and support,
+  in particular Yury Khrustalev and Kevin Brodsky. This work was only possible
+  building on the extensive work already completed on compartments, the PCuABI
+  Linux kernel and Morello/CHERI.
+
+Refs
+
+   1. https://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=BPF
+   2. CVE-2016-2383  CVE-2016-4557  CVE-2017-16995 CVE-2017-17856 CVE-2017-17855
+      CVE-2017-17854 CVE-2017-17853 CVE-2017-17852 CVE-2017-16996 CVE-2017-17862
+      CVE-2017-17863 CVE-2017-17864 CVE-2017-9150  CVE-2018-18445 CVE-2019-7308
+      CVE-2020-27170 CVE-2020-27171 CVE-2021-33200 CVE-2021-33624 CVE-2021-3444
+      CVE-2021-3490  CVE-2021-4001  CVE-2021-45402 CVE-2022-0500 CVE-2022-23222
+      CVE-2022-2785 CVE-2022-2905 CVE-2023-2163 CVE-2023-39191
+      (list is not exhaustive)
+   3. https://googleprojectzero.blogspot.com/2018/01/reading-privileged-memory-with-side.html
+   4. https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=290af86629b25ffd1ed6232c4e9107da031705cb).
+   5. https://lore.kernel.org/lkml/YX%2FWKa4qYamp1ml9@FVFF77S0Q05N/T/
+   6. https://lwn.net/Articles/796328/
+   7. https://lwn.net/Articles/929746/
+   8. https://lore.kernel.org/bpf/20200513230355.7858-1-alexei.starovoitov@gmail.com/
+   9. https://arxiv.org/pdf/2302.10366.pdf
+  10. https://lwn.net/Articles/857228/
+  11. https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b569c1c622c5e60c960a6ae5bd0880e0cdbd56b1
+  12. CVE-2023-2163
+  13. CVE-2021-33200, CVE-2021-3490, CVE-2021-3444, CVE-2020-8835, CVE-2020-27194, CVE-2018-18445
+  14. CVE-2022-23222
+  15. https://git.morello-project.org/morello/morello-examples/-/tree/main/src/hybrid?ref_type=heads
+  16. https://git.morello-project.org/morello/kernel/linux/-/wikis/Morello-pure-capability-kernel-user-Linux-ABI-specification
+  17. https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/verifier.c?h=v6.7#n10130
+  18. https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/verifier.c?h=v6.7#n12025
+  19. Morello Architecture Reference Manual (DDI0606), Executive/Restricted banking, RNHGSJ
+  20. Morello Architecture Reference Manual (DDI0606), 4.4.11 BLRR + 4.4.16 BRR
+  21. https://git.morello-project.org/morello/morello-examples/-/tree/main/src/restricted?ref_type=heads
+  22. Arm Architecture Reference Manual for A-profile architecture (DDI 0487K.a), D1.2.2.1 Stack pointer register selection, IVYNZY
+  23. Morello Architecture Reference Manual (DDI0606), 2.13 Exception model, RGXNXG
+  24. Morello Architecture Reference Manual (DDI0606), 5.613 shared/functions/registers/BranchToAddr
+  25. Morello Architecture Reference Manual (DDI0606), 5.390 shared/functions/capability/CapSetValue
+  26. https://www.kernel.org/doc/html/v6.7/arch/arm64/memory.html
+  27. https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/armv8-1-m-pointer-authentication-and-branch-target-identification-extension
+  28. https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=fa76cfe65c1d748ef418e930a4b631a03b28f04c
+  29. https://docs.cilium.io/en/latest/bpf/architecture/#hardening
+  30. https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=4f3446b
+
