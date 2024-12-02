@@ -401,6 +401,7 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	 *                        |FP/LR|
 	 * current A64_FP =>  -16:+-----+
 	 *                        | ... | callee saved registers
+	 * 
 	 * BPF fp register => -64:+-----+ <= (BPF_FP)
 	 *                        |     |
 	 *                        | ... | BPF prog stack
@@ -450,7 +451,7 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	 */
 	emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx);
 	/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
-	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4), ctx);
+	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4+4), ctx); //4 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way)
 	emit_a64_mov_i(0, A64_R(2), ctx->image_size, ctx);
 	emit_call((const u64)bpf_enter_sandbox, ctx);
 	/* ----> Now we're in restricted mode */
@@ -766,7 +767,11 @@ static void build_plt(struct jit_ctx *ctx)
 static void build_epilogue(struct jit_ctx *ctx)
 {
 	const u8 r0 = bpf2a64[BPF_REG_0];
-
+	
+	//If we finish program and we're just done, we're right here!
+	const u8 r1 = bpf2a64[BPF_REG_1];
+	emit_addr_mov_i64(r1, 0x0, ctx); //TODO: Did we just change the Ret CLR offset by adding this new instruction, in which case we need to add more?
+	
 	/*
 	 * Exit from restricted mode compartment
 	 * CLR should point to the instruction below this one
@@ -775,6 +780,7 @@ static void build_epilogue(struct jit_ctx *ctx)
 	/* ----> Now we're back in executive mode */
 
 	/* Restore x19-x28 */
+
 	emit(A64_POP(A64_R(27), A64_R(28), A64_SP), ctx);
 	emit(A64_POP(A64_R(25), A64_R(26), A64_SP), ctx);
 	emit(A64_POP(A64_R(23), A64_R(24), A64_SP), ctx);
@@ -1225,7 +1231,26 @@ emit_cond_jmp:
 					    &func_addr, &func_addr_fixed);
 		if (ret < 0)
 			return ret;
-		emit_call(func_addr, ctx);
+
+		//Store where we want to call our kfunc in reg1
+
+
+
+		const u8 tmpreg1 = bpf2a64[TMP_REG_1];
+		emit_addr_mov_i64(tmpreg1, func_addr, ctx);
+
+
+		const u8 tmpreg2 = bpf2a64[TMP_REG_2];
+		//TODO: Somehow save information that lets executive mode know how to return *here* in tmpreg2 (probably just current index + 4?)
+
+		// emit a return to executive mode instruction :)
+
+		emit(0xc2c253c0, ctx); // ret clr
+
+		//Eventually return here via ... magic (TODO)
+
+		// When we jump back here from executive mode, the return value we want needs to be in (ARM64) r0 :)
+
 		emit(A64_MOV(1, r0, A64_R(0)), ctx);
 		break;
 	}
@@ -1996,7 +2021,7 @@ static int prepare_trampoline(struct jit_ctx *ctx, struct bpf_tramp_image *im,
 	 *                  [ arg reg N         ]
 	 *                  [ ...               ]
 	 * SP + args_off    [ arg reg 1         ]
-	 *
+	 *					
 	 * SP + nregs_off   [ arg regs count    ]
 	 *
 	 * SP + ip_off      [ traced function   ] BPF_TRAMP_F_IP_ARG flag
