@@ -769,8 +769,8 @@ static void build_epilogue(struct jit_ctx *ctx)
 	const u8 r0 = bpf2a64[BPF_REG_0];
 	
 	//If we finish program and we're just done, we're right here!
-	const u8 r1 = bpf2a64[BPF_REG_1];
-	emit_addr_mov_i64(r1, 0x0, ctx); //TODO: Did we just change the Ret CLR offset by adding this new instruction, in which case we need to add more?
+	const u8 tempreg1 = bpf2a64[TMP_REG_1];
+	emit_addr_mov_i64(tempreg1, 0x0, ctx);
 	
 	/*
 	 * Exit from restricted mode compartment
@@ -1233,9 +1233,6 @@ emit_cond_jmp:
 			return ret;
 
 		//Store where we want to call our kfunc in reg1
-
-
-
 		const u8 tmpreg1 = bpf2a64[TMP_REG_1];
 		emit_addr_mov_i64(tmpreg1, func_addr, ctx);
 
