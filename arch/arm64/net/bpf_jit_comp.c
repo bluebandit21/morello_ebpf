@@ -87,6 +87,7 @@ struct jit_ctx {
 	void *stack;
 	u32 stack_size;
 	int fpb_offset;
+  int epilogue_jump_offset; // place from which we are going to BRR back to helper return address
 };
 
 struct bpf_plt {
@@ -220,6 +221,13 @@ static inline int epilogue_offset(const struct jit_ctx *ctx)
 	int from = ctx->idx;
 
 	return to - from;
+}
+
+static inline int epilogue_helper_offset(const struct jit_ctx *ctx) {
+  int from = ctx->epilogue_jump_offset;
+  int to = ctx->idx;
+
+  return to - from;
 }
 
 static bool is_addsub_imm(u32 imm)
@@ -767,20 +775,43 @@ static void build_plt(struct jit_ctx *ctx)
 static void build_epilogue(struct jit_ctx *ctx)
 {
 	const u8 r0 = bpf2a64[BPF_REG_0];
-	
-	//If we finish program and we're just done, we're right here!
 	const u8 tempreg1 = bpf2a64[TMP_REG_1];
-	emit_addr_mov_i64(tempreg1, 0x0, ctx);
+	const u8 tempreg2 = bpf2a64[TMP_REG_2];
+
+	//If we finish program and we're just done, we're right here!
+	emit_addr_mov_i64(tempreg1, 0x0, ctx); //Instruction 1 after start of epilogue
 	
 	/*
 	 * Exit from restricted mode compartment
 	 * CLR should point to the instruction below this one
 	 */
-	emit(0xc2c253c0, ctx); // ret clr
+	emit(0xc2c253c0, ctx); // ret clr, Instruction 2 after start of epilogue
 	/* ----> Now we're back in executive mode */
 
-	/* Restore x19-x28 */
+	// Check tempreg1: If it's zero, we're here because the BPF function is done; perform regular epilogue tasks
+	// If it isn't zero, we're here because the BPF function wanted to call a kernel helper function: Call it and return into the BPF function
+  	emit(A64_CBNZ(1, tempreg1, 4), ctx); //Skip 4 instructions ahead if tempreg1 is zero
+	{
+		// ---tempreg1 *was not* zero-----
+		// Push tempreg2 and LR onto the stack.
+		emit(A64_PUSH(tempreg2, A64_LR, A64_SP), ctx); //Instruction 1 after CBNZ
+		// NOTE: may need to also store restricted mode registers here (RDDC, RCSP)
 
+		// Branch and link to the address stored in tempreg1.
+		emit(A64_BLR(tempreg1), ctx); //Instruction 2 after CBNZ
+
+		// Pop LR and tempreg2 back from the stack to restore the previous state.
+		emit(A64_POP(A64_LR, tempreg2, A64_SP), ctx); //Instruction 3 after CBNZ
+
+		// Return to the address stored in tempreg2.
+		// May also need to reset bounds for restricted mode here //TODO: Check?
+		// Emit the instruction BRR as a literal, see ISA reference at A64_ISA_xml_morelloA-2022-01/ISA_A64_xml_morelloA-2022-01/xhtml/brr_c.html
+		//Instruction 4 after CBNZ
+		emit(0xc2c21003 + ((bpf2a64[TMP_REG_2]) << 5), ctx); //Andrew magic ;) (Warning: only like 80% chance this is fully right)
+	}
+// <else>: We exited because we're done.
+	/* Restore x19-x28 */
+  
 	emit(A64_POP(A64_R(27), A64_R(28), A64_SP), ctx);
 	emit(A64_POP(A64_R(25), A64_R(26), A64_SP), ctx);
 	emit(A64_POP(A64_R(23), A64_R(24), A64_SP), ctx);
@@ -1238,16 +1269,14 @@ emit_cond_jmp:
 
 
 		const u8 tmpreg2 = bpf2a64[TMP_REG_2];
+
 		//TODO: Somehow save information that lets executive mode know how to return *here* in tmpreg2 (probably just current index + 4?)
-
+    	// want to store the return address (ctx->idx + 4) (one instruction after ret clr) to tmpreg2
+   		emit(A64_ADR(tmpreg2,1), ctx);
 		// emit a return to executive mode instruction :)
-
 		emit(0xc2c253c0, ctx); // ret clr
 
-		//Eventually return here via ... magic (TODO)
-
 		// When we jump back here from executive mode, the return value we want needs to be in (ARM64) r0 :)
-
 		emit(A64_MOV(1, r0, A64_R(0)), ctx);
 		break;
 	}
@@ -1733,6 +1762,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	}
 
 	ctx.epilogue_offset = ctx.idx;
+  ctx.epilogue_jump_offset = ctx.idx;
 	build_epilogue(&ctx);
 	build_plt(&ctx);
 
@@ -1776,6 +1806,7 @@ skip_init_ctx:
 
 	/* Update now we know the actual size */
 	ctx.epilogue_offset = ctx.idx;
+    ctx.epilogue_jump_offset = ctx.epilogue_offset + (6 * 4); // BRR is 6 instructions away from epilogue start
 
 	build_epilogue(&ctx);
 	build_plt(&ctx);
