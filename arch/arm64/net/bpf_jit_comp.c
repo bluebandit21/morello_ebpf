@@ -459,7 +459,7 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	 */
 	emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx);
 	/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
-	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4+4), ctx); //4 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way)
+	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4*3+4), ctx); //4*3 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way)
 	emit_a64_mov_i(0, A64_R(2), ctx->image_size, ctx);
 	emit_call((const u64)bpf_enter_sandbox, ctx);
 	/* ----> Now we're in restricted mode */
@@ -779,13 +779,13 @@ static void build_epilogue(struct jit_ctx *ctx)
 	const u8 tempreg2 = bpf2a64[TMP_REG_2];
 
 	//If we finish program and we're just done, we're right here!
-	emit_addr_mov_i64(tempreg1, 0x0, ctx); //Instruction 1 after start of epilogue
+	emit_addr_mov_i64(tempreg1, 0x0, ctx);  //3 instructions!
 	
 	/*
 	 * Exit from restricted mode compartment
 	 * CLR should point to the instruction below this one
 	 */
-	emit(0xc2c253c0, ctx); // ret clr, Instruction 2 after start of epilogue
+	emit(0xc2c253c0, ctx); // ret clr, Instruction 4 after start of epilogue
 	/* ----> Now we're back in executive mode */
 
 	// Check tempreg1: If it's zero, we're here because the BPF function is done; perform regular epilogue tasks
