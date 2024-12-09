@@ -459,7 +459,7 @@ static int build_prologue(struct jit_ctx *ctx, bool ebpf_from_cbpf)
 	 */
 	emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx);
 	/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
-	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4*3+4), ctx); //4*3 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way)
+	emit(A64_ADR(A64_R(1), (epilogue_offset(ctx)*4)+4*1+4), ctx); //4*1 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way)
 	emit_a64_mov_i(0, A64_R(2), ctx->image_size, ctx);
 	emit_call((const u64)bpf_enter_sandbox, ctx);
 	/* ----> Now we're in restricted mode */
@@ -779,7 +779,8 @@ static void build_epilogue(struct jit_ctx *ctx)
 	const u8 tempreg2 = bpf2a64[TMP_REG_2];
 
 	//If we finish program and we're just done, we're right here!
-	emit_addr_mov_i64(tempreg1, 0x0, ctx);  //3 instructions!
+	emit(A64_MOVZ(1, tempreg1,0,0), ctx); // 1 instruction
+	//emit_addr_mov_i64(tempreg1, 0x0, ctx);  //3 instructions!
 	
 	/*
 	 * Exit from restricted mode compartment
@@ -790,7 +791,7 @@ static void build_epilogue(struct jit_ctx *ctx)
 
 	// Check tempreg1: If it's zero, we're here because the BPF function is done; perform regular epilogue tasks
 	// If it isn't zero, we're here because the BPF function wanted to call a kernel helper function: Call it and return into the BPF function
-  	emit(A64_CBNZ(1, tempreg1, 4), ctx); //Skip 4 instructions ahead if tempreg1 is zero
+  	emit(A64_CBZ(1, tempreg1, 5), ctx); //Skip 4 instructions ahead if tempreg1 is zero
 	{
 		// ---tempreg1 *was not* zero-----
 		// Push tempreg2 and LR onto the stack.
@@ -1272,12 +1273,10 @@ emit_cond_jmp:
 
 		//TODO: Somehow save information that lets executive mode know how to return *here* in tmpreg2 (probably just current index + 4?)
     	// want to store the return address (ctx->idx + 4) (one instruction after ret clr) to tmpreg2
+
    		emit(A64_ADR(tmpreg2,1), ctx);
 		// emit a return to executive mode instruction :)
 		emit(0xc2c253c0, ctx); // ret clr
-
-		// When we jump back here from executive mode, the return value we want needs to be in (ARM64) r0 :)
-		emit(A64_MOV(1, r0, A64_R(0)), ctx);
 		break;
 	}
 	/* tail call */
