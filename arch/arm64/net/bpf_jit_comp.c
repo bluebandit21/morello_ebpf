@@ -355,6 +355,84 @@ void bpf_enter_sandbox(void *sp, void *ret_addr, int image_size)
 	);
 }
 
+void bpf_reenter_sandbox(void *sp, void *ret_addr, int image_size)
+{
+	void * __capability ddc;
+	void * __capability rcsp;
+	void * __capability rddc;
+	void * __capability fnp;
+	void * __capability clr;
+	void *lr;
+
+	/*
+	 * All new caps are explicitly derived from kernel DDC; since EL1 DDC is
+	 * entirely unrestricted, this gives us a blank cap to use as a base
+	 */
+	ddc = cheri_ddc_get();
+
+	/* Setup RCSP to top of new stack created in vmalloc region */
+	rcsp = cheri_address_set(ddc, (u64)sp);
+	rcsp = cheri_bounds_set(rcsp, BPF_STACK_SZ);
+	rcsp = cheri_offset_set(rcsp, BPF_STACK_SZ);
+	asm volatile("msr rcsp_el0, %[RCSP]" :: [RCSP] "C" (rcsp));
+
+	/* Restrict RDDC to the vmalloc region */
+	rddc = cheri_address_set(ddc, VMALLOC_START);
+	rddc = cheri_bounds_set(rddc, VMALLOC_END - VMALLOC_START);
+	rddc = cheri_perms_clear(rddc, PERM_EXECUTIVE | PERM_SYS_REG);
+	asm volatile("msr rddc_el0, %[RDDC]" :: [RDDC] "C" (rddc));
+
+	/*
+	 * To switch to restricted mode with BLRR/BRR, we must have a sealed
+	 * function ptr with a cleared executive permission bit (PERM_EXECUTIVE)
+	 *
+	 * We want to return from bpf_enter_sandbox in restricted mode, so use
+	 * link reg (x30) for the function ptr
+	 *
+	 * Setting the bounds to LR + image_size isn't precise, but it's good
+	 * enough for now. That restricts PCC/execution to roughly the current
+	 * bpf program. To support bpf to bpf and bpf tail calls within the
+	 * vmalloc region needs further work.
+	 *
+	 * PERM_SYS_REG: remove access to privileged system regs e.g. mmu,
+	 * interupts mgmt, processor reset
+	 */
+	__asm__ volatile("mov %[LR], x11" :[LR] "=r" (lr): );
+	fnp = cheri_address_set(ddc, (u64)lr);
+	//fnp = cheri_bounds_set(fnp, image_size); //For now, just don't restrict our executive area (TODO: FIXME)
+	fnp = cheri_perms_clear(fnp, PERM_EXECUTIVE | PERM_SYS_REG);
+	fnp = cheri_sentry_create(fnp);
+
+	/*
+	 * To exit restricted mode, we need to do ret(clr)
+	 *
+	 * If we use BLRR we'd create a sealed c30/clr pointing to the
+	 * instruction directly after the BLRR - that's no good to return
+	 * back here to the end of this function
+	 *
+	 * Use BRR and manually craft the CLR to be able to return somewhere
+	 * we actually want to return to when exiting restricted mode -
+	 * currently that's the start of the epilogue, directly after the
+	 * ret(clr) instruction
+	 *
+	 * Note: since we're using BRR to exit instead of a normal RET, we're
+	 * relying on the code gen here to not create a stack frame; otherwise
+	 * we end up branching out before restoring the stack. Since this
+	 * is a leaf function that doesn't allocate or use stack space we're
+	 * ok, however this function would be less liable to break in pure
+	 * assembly
+	 */
+	clr = cheri_address_set(ddc, (u64)ret_addr);
+	clr = cheri_sentry_create(clr);
+	__asm__ volatile(
+		"mov c30, %[CLR]\n"
+		"brr %[FNP]" /* Branch to restricted mode instead of RET */
+		::
+		[CLR] "r" (clr),
+		[FNP] "r" (fnp)
+	);
+}
+
 /* generated prologue:
  *      bti c // if CONFIG_ARM64_BTI_KERNEL
  *      mov x9, lr
@@ -791,24 +869,32 @@ static void build_epilogue(struct jit_ctx *ctx)
 
 	// Check tempreg1: If it's zero, we're here because the BPF function is done; perform regular epilogue tasks
 	// If it isn't zero, we're here because the BPF function wanted to call a kernel helper function: Call it and return into the BPF function
-  	emit(A64_CBZ(1, tempreg1, 5), ctx); //Skip 4 instructions ahead if tempreg1 is zero
+  	emit(A64_CBZ(1, tempreg1, 13), ctx); //Skip 13 instructions ahead if tempreg1 is zero
 	{
 		// ---tempreg1 *was not* zero-----
 		// Push tempreg2 and LR onto the stack.
-		emit(A64_PUSH(tempreg2, A64_LR, A64_SP), ctx); //Instruction 1 after CBNZ
+		emit(A64_PUSH(tempreg2, A64_LR, A64_SP), ctx); //Instruction 1 after CBZ
 		// NOTE: may need to also store restricted mode registers here (RDDC, RCSP)
 
 		// Branch and link to the address stored in tempreg1.
-		emit(A64_BLR(tempreg1), ctx); //Instruction 2 after CBNZ
+		emit(A64_BLR(tempreg1), ctx); //Instruction 2 after CBZ
+		//emit(A64_BR(A64_ZR), ctx); //Can be used to ensure functions are being called
 
 		// Pop LR and tempreg2 back from the stack to restore the previous state.
-		emit(A64_POP(tempreg2, A64_LR, A64_SP), ctx); //Instruction 3 after CBNZ
+		emit(A64_POP(tempreg2, A64_LR, A64_SP), ctx); //Instruction 3 after CBZ
 
 		// Return to the address stored in tempreg2.
-		// May also need to reset bounds for restricted mode here //TODO: Check?
-		// Emit the instruction BRR as a literal, see ISA reference at A64_ISA_xml_morelloA-2022-01/ISA_A64_xml_morelloA-2022-01/xhtml/brr_c.html
-		//Instruction 4 after CBNZ
-		emit(0xc2c21003 + ((bpf2a64[TMP_REG_2]) << 5), ctx); //Andrew magic ;) (Warning: only like 80% chance this is fully right)
+
+		emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx); //Instructions 4-6 after CBZ
+		/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
+		emit(A64_ADR(A64_R(1), -7 * 4), ctx); //4*1 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way) //Instruction 7 after CBZ
+
+
+		emit(A64_MOVZ(1, A64_R(2), ctx->image_size, 0), ctx); //Instruction 8 after CBZ
+	//	assert(! (ctx->image_size & 0x80000000)); //No negative number for image size
+	//	assert(! (ctx->image_size & 0xffff0000)); //Image size isn't greater than 2^32
+	
+		emit_call((const u64)bpf_reenter_sandbox, ctx); //Instrutions 9-12
 	}
 // <else>: We exited because we're done.
 	/* Restore x19-x28 */
@@ -1274,7 +1360,7 @@ emit_cond_jmp:
 		//TODO: Somehow save information that lets executive mode know how to return *here* in tmpreg2 (probably just current index + 4?)
     	// want to store the return address (ctx->idx + 4) (one instruction after ret clr) to tmpreg2
 
-   		emit(A64_ADR(tmpreg2,1), ctx);
+   		emit(A64_ADR(tmpreg2,2*4), ctx); //??? Is this really *1*? Seems like it should be *2* if offset in instructions, or 8 if in bytes?
 		// emit a return to executive mode instruction :)
 		emit(0xc2c253c0, ctx); // ret clr
 		break;
