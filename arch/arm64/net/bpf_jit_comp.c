@@ -364,6 +364,10 @@ void bpf_reenter_sandbox(void *sp, void *ret_addr, int image_size)
 	void * __capability clr;
 	void *lr;
 
+	__asm__ volatile("mov %[LR], x11" :[LR] "=r" (lr): );
+	__asm__ volatile("" ::: "memory");
+
+
 	/*
 	 * All new caps are explicitly derived from kernel DDC; since EL1 DDC is
 	 * entirely unrestricted, this gives us a blank cap to use as a base
@@ -397,7 +401,7 @@ void bpf_reenter_sandbox(void *sp, void *ret_addr, int image_size)
 	 * PERM_SYS_REG: remove access to privileged system regs e.g. mmu,
 	 * interupts mgmt, processor reset
 	 */
-	__asm__ volatile("mov %[LR], x11" :[LR] "=r" (lr): );
+	
 	fnp = cheri_address_set(ddc, (u64)lr);
 	//fnp = cheri_bounds_set(fnp, image_size); //For now, just don't restrict our executive area (TODO: FIXME)
 	fnp = cheri_perms_clear(fnp, PERM_EXECUTIVE | PERM_SYS_REG);
@@ -879,6 +883,7 @@ static void build_epilogue(struct jit_ctx *ctx)
 		// Branch and link to the address stored in tempreg1.
 		emit(A64_BLR(tempreg1), ctx); //Instruction 2 after CBZ
 		//emit(A64_BR(A64_ZR), ctx); //Can be used to ensure functions are being called
+		
 
 		// Pop LR and tempreg2 back from the stack to restore the previous state.
 		emit(A64_POP(tempreg2, A64_LR, A64_SP), ctx); //Instruction 3 after CBZ
@@ -887,7 +892,7 @@ static void build_epilogue(struct jit_ctx *ctx)
 
 		emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx); //Instructions 4-6 after CBZ
 		/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
-		emit(A64_ADR(A64_R(1), -7 * 4), ctx); //4*1 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way) //Instruction 7 after CBZ
+		emit(A64_ADR(A64_R(1), (-7 * 4)), ctx); //4*1 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way) //Instruction 7 after CBZ
 
 
 		emit(A64_MOVZ(1, A64_R(2), ctx->image_size, 0), ctx); //Instruction 8 after CBZ
