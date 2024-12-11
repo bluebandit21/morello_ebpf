@@ -802,8 +802,7 @@ static void build_epilogue(struct jit_ctx *ctx)
 		emit(A64_BLR(tempreg1), ctx); //Instruction 2 after CBNZ
 
 		// Pop LR and tempreg2 back from the stack to restore the previous state.
-		emit(A64_POP(A64_LR, tempreg2, A64_SP), ctx); //Instruction 3 after CBNZ
-		//^ Andrew note: Pretty sure tempreg2 and A64_LR are swapped here and this is wrong
+		emit(A64_POP(tempreg2, A64_LR, A64_SP), ctx); //Instruction 3 after CBNZ
 
 		// Return to the address stored in tempreg2.
 		// May also need to reset bounds for restricted mode here //TODO: Check?
