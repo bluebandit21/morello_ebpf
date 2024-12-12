@@ -363,8 +363,12 @@ void bpf_reenter_sandbox(void *sp, void *ret_addr, int image_size)
 	void * __capability fnp;
 	void * __capability clr;
 	void *lr;
+	void *retval;
 
-	__asm__ volatile("mov %[LR], x11" :[LR] "=r" (lr): );
+	__asm__ volatile(
+		"mov %[LR], x11\n"
+	 	"mov %[RET], x7"
+		: [LR] "=r" (lr), [RET] "=r" (retval) :: "x11", "x7" );
 	__asm__ volatile("" ::: "memory");
 
 
@@ -429,9 +433,11 @@ void bpf_reenter_sandbox(void *sp, void *ret_addr, int image_size)
 	clr = cheri_address_set(ddc, (u64)ret_addr);
 	clr = cheri_sentry_create(clr);
 	__asm__ volatile(
+		"mov x7, %[RET]\n"
 		"mov c30, %[CLR]\n"
 		"brr %[FNP]" /* Branch to restricted mode instead of RET */
 		::
+		[RET] "r" (retval),
 		[CLR] "r" (clr),
 		[FNP] "r" (fnp)
 	);
@@ -873,7 +879,7 @@ static void build_epilogue(struct jit_ctx *ctx)
 
 	// Check tempreg1: If it's zero, we're here because the BPF function is done; perform regular epilogue tasks
 	// If it isn't zero, we're here because the BPF function wanted to call a kernel helper function: Call it and return into the BPF function
-  	emit(A64_CBZ(1, tempreg1, 13), ctx); //Skip 13 instructions ahead if tempreg1 is zero
+  	emit(A64_CBZ(1, tempreg1, 14), ctx); //Skip 14 instructions ahead if tempreg1 is zero
 	{
 		// ---tempreg1 *was not* zero-----
 		// Push tempreg2 and LR onto the stack.
@@ -888,18 +894,19 @@ static void build_epilogue(struct jit_ctx *ctx)
 		// Pop LR and tempreg2 back from the stack to restore the previous state.
 		emit(A64_POP(tempreg2, A64_LR, A64_SP), ctx); //Instruction 3 after CBZ
 
+		emit(A64_MOV(1, r0, A64_R(0)), ctx); //Instruction 4 after CBZ
 		// Return to the address stored in tempreg2.
 
-		emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx); //Instructions 4-6 after CBZ
+		emit_addr_mov_i64(A64_R(0), (const u64)ctx->stack, ctx); //Instructions 5-7 after CBZ
 		/* byte offset = idx * sizeof(inst) + sizeof(emit_call) */
-		emit(A64_ADR(A64_R(1), (-7 * 4)), ctx); //4*1 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way) //Instruction 7 after CBZ
+		emit(A64_ADR(A64_R(1), (-8 * 4)), ctx); //4*1 to skip setting r1 to 0, + 4 to skip the retclr instruction (so we don't infinitely loop in a silly way) //Instruction 8 after CBZ
 
 
-		emit(A64_MOVZ(1, A64_R(2), ctx->image_size, 0), ctx); //Instruction 8 after CBZ
+		emit(A64_MOVZ(1, A64_R(2), ctx->image_size, 0), ctx); //Instruction 9 after CBZ
 	//	assert(! (ctx->image_size & 0x80000000)); //No negative number for image size
 	//	assert(! (ctx->image_size & 0xffff0000)); //Image size isn't greater than 2^32
 	
-		emit_call((const u64)bpf_reenter_sandbox, ctx); //Instrutions 9-12
+		emit_call((const u64)bpf_reenter_sandbox, ctx); //Instrutions 10-13
 	}
 // <else>: We exited because we're done.
 	/* Restore x19-x28 */
@@ -1369,7 +1376,7 @@ emit_cond_jmp:
 		// emit a return to executive mode instruction :)
 		emit(0xc2c253c0, ctx); // ret clr
 
-		emit(A64_MOV(1, r0, A64_R(0)), ctx);
+		//emit(A64_MOV(1, r0, A64_R(0)), ctx);
 		break;
 	}
 	/* tail call */
