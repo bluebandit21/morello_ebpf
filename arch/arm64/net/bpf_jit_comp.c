@@ -1368,6 +1368,8 @@ emit_cond_jmp:
    		emit(A64_ADR(tmpreg2,2*4), ctx); //??? Is this really *1*? Seems like it should be *2* if offset in instructions, or 8 if in bytes?
 		// emit a return to executive mode instruction :)
 		emit(0xc2c253c0, ctx); // ret clr
+
+		emit(A64_MOV(1, r0, A64_R(0)), ctx);
 		break;
 	}
 	/* tail call */
